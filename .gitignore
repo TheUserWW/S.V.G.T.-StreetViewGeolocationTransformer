@@ -1,0 +1,53 @@
+# Python environments, bytecode and tool caches
+.venv/
+.runtime/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Local datasets, trained weights and application state
+/data/
+/checkpoints/
+/.gui/
+/.test-artifacts/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Generated client bundle; maintain its sources in streetgeo/client/
+/clinet/
+/build/
+/dist/
+/*.zip
+/*.7z
+/*.rar
+/*.tar
+/*.tar.gz
+/*.tgz
+
+# Local secrets; keep the shareable example
+.env
+.env.*
+!.env.example
+
+# Logs, temporary files and desktop metadata
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
