@@ -13,14 +13,10 @@ import threading
 import uuid
 
 from streetgeo.paths import ROOT
-DATA_SOURCES = ("GSV-Cities（全球）", "Mapillary / JSONL", "混合数据（全球）", "OpenStreetView-5M（部分图片可用）")
+DATA_SOURCES = ("OpenStreetView-5M（部分图片可用）",)
 DEFAULTS = {
-    "dataset_dir": "data/mapillary_us", "region": "conus", "states": "",
-    "max_images": "10000", "resolution": "1024", "download_workers": "4",
-    "requests_per_second": "2", "max_gb": "20", "min_free_gb": "5", "max_pages": "2000",
-    "split_manifest": "data/mapillary_us/all.jsonl", "split_output": "data/world_osv_514m",
-    "data_source": DATA_SOURCES[3], "gsv_root": "data/archive", "osv_root": "",
-    "block_degrees": "0.02", "guard_m": "250",
+    "split_output": "data/world_osv_514m", "data_source": DATA_SOURCES[0],
+    "osv_root": "data/OpenStreetView-5M", "block_degrees": "0.02", "guard_m": "250",
     "train_manifest": "data/world_osv_514m/train.jsonl", "val_manifest": "data/world_osv_514m/val.jsonl",
     "output": "checkpoints/streetgeo_514m_osv/best.pt", "resume": "checkpoints/streetgeo_514m_osv/best.last.pt",
     "mode": "新建训练", "epochs": "4", "batch_size": "64", "num_workers": "4",
@@ -42,6 +38,7 @@ def load_settings(path):
             result.update({key: str(value) for key, value in saved.items() if key in DEFAULTS})
     except (OSError, ValueError, TypeError):
         pass
+    result["data_source"] = DATA_SOURCES[0]
     return result
 
 
@@ -71,53 +68,17 @@ def input_file(value, label):
     return str(resolve_path(value))
 
 
-def build_download(values, stop_file):
-    arguments = ["--output", str(resolve_path(values["dataset_dir"])), "--region", values["region"],
-                 "--stop-file", str(stop_file)]
-    if values["region"] not in ("conus", "us") or values["resolution"] not in ("256", "1024", "2048"):
-        raise ValueError("请选择有效的地区和图像分辨率")
-    for name, label in (("max_images", "目标图片数量"), ("download_workers", "下载线程数"),
-                        ("max_pages", "本次查询页数")):
-        value = number(values, name, label, integer=True, minimum=0, strict=True)
-        flag = "workers" if name == "download_workers" else name.replace("_", "-")
-        arguments += ["--" + flag, str(value)]
-    for name, label, strict in (("requests_per_second", "每秒请求数", True), ("max_gb", "图片磁盘预算", True),
-                                ("min_free_gb", "保留磁盘空间", False)):
-        arguments += ["--" + name.replace("_", "-"), str(number(values, name, label, strict=strict))]
-    arguments += ["--resolution", values["resolution"]]
-    states = values["states"].strip().upper().replace("，", ",")
-    if states:
-        if not all(len(part.strip()) == 2 and part.strip().isascii() and part.strip().isalpha() for part in states.split(",")):
-            raise ValueError("州代码使用两个英文字母，多个州用逗号分隔，例如 CA,NV,AZ")
-        arguments += ["--states", ",".join(part.strip() for part in states.split(","))]
-    return arguments
-
-
 def build_prepare(values, stop_file=None):
-    source = values.get("data_source", "Mapillary / JSONL")
-    if source not in DATA_SOURCES:
-        raise ValueError("请选择有效的数据来源")
-    arguments = []
-    mixed = source == DATA_SOURCES[2]
-    if source == DATA_SOURCES[0] or (mixed and values.get("gsv_root", "").strip()):
-        root = resolve_path(values.get("gsv_root", "data/archive"))
-        if not (root / "Images").is_dir() or not (root / "Dataframes").is_dir():
-            raise ValueError("请选择包含 Images 与 Dataframes 的 GSV-Cities 解压目录")
-        arguments += ["--dataset-root", str(root)]
-    if source == DATA_SOURCES[1] or (mixed and values.get("split_manifest", "").strip()):
-        arguments += ["--manifest", input_file(values["split_manifest"], "Mapillary / JSONL 清单")]
-    if source == DATA_SOURCES[3] or (mixed and values.get("osv_root", "").strip()):
-        from streetgeo.datasets.osv5m import osv_layout
-        root = resolve_path(values.get("osv_root", "data/OpenStreetView-5M"))
-        osv_layout(root)
-        arguments += ["--dataset-root", str(root)]
-    if mixed and len(arguments) < 4:
-        raise ValueError("混合数据至少填写两个来源；不使用的来源路径请留空")
+    if values.get("data_source", DATA_SOURCES[0]) != DATA_SOURCES[0]:
+        raise ValueError("训练仅支持 OpenStreetView-5M，不接受其他数据来源")
+    from streetgeo.datasets.osv5m import osv_layout
+    root = resolve_path(values.get("osv_root") or DEFAULTS["osv_root"])
+    osv_layout(root)
     if not values["split_output"].strip():
         raise ValueError("请选择数据划分输出目录")
-    arguments += ["--output-dir", str(resolve_path(values["split_output"])),
-                  "--block-degrees", str(number(values, "block_degrees", "地理分组大小", strict=True)),
-                  "--guard-m", str(number(values, "guard_m", "近邻隔离距离"))]
+    arguments = ["--dataset-root", str(root), "--output-dir", str(resolve_path(values["split_output"])),
+                 "--block-degrees", str(number(values, "block_degrees", "地理分组大小", strict=True)),
+                 "--guard-m", str(number(values, "guard_m", "近邻隔离距离"))]
     if stop_file:
         arguments += ["--stop-file", str(stop_file)]
     return arguments
@@ -141,7 +102,11 @@ def build_training(values, stop_file):
         raise ValueError("请选择模型输出文件")
     if output.exists() or output.with_name(output.stem + ".last" + output.suffix).exists():
         raise ValueError("该位置已有训练进度，请选择“继续上次训练”或更换输出文件")
-    arguments += ["--train-manifest", input_file(values["train_manifest"], "训练清单"),
+    from streetgeo.datasets.policy import check_osv_manifest_header
+    check_osv_manifest_header(input_file(values["train_manifest"], "OpenStreetView-5M 训练清单"))
+    if values["val_manifest"].strip():
+        check_osv_manifest_header(input_file(values["val_manifest"], "OpenStreetView-5M 验证清单"))
+    arguments += ["--train-manifest", input_file(values["train_manifest"], "OpenStreetView-5M 训练清单"),
                   "--output", str(output), "--amp", amp]
     if values["val_manifest"].strip():
         arguments += ["--val-manifest", input_file(values["val_manifest"], "验证清单")]

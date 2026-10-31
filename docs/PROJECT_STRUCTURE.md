@@ -5,7 +5,7 @@ GeoGuesser/
 ├─ streetgeo/                 Runtime code; importing does not start training or networking
 │  ├─ __main__.py              Command dispatcher: python -m streetgeo
 │  ├─ core/                    Model, configuration, geographic grid, checkpoints
-│  ├─ datasets/                Image loading, source adapters, splitting, Mapillary collection
+│  ├─ datasets/                Image loading, OSV-5M import, splitting, legacy collection utilities
 │  ├─ training/                Training loop, sampling, recovery, stop requests
 │  ├─ inference/               Image prediction, model reuse, tile cache
 │  ├─ maps/                    Map data, projections, canvas, offline map refresh
@@ -24,6 +24,8 @@ GeoGuesser/
 └─ *.bat                       Training-workbench and prediction-map launchers
 ```
 
+Training accepts OpenStreetView-5M only. Prepared manifests retain source and image-ID metadata, which is validated for training, validation, and resume. Legacy collection/source utilities are not accepted training inputs. The workbench exposes only OSV-5M import, training, and prediction.
+
 ## Development and execution
 
 All application, command-line, and maintenance code is in `streetgeo/`. Old root Python forwarding files and the `chat` alias have been removed. Run these commands from the workspace root. Both batch launchers use the same package entry point.
@@ -32,10 +34,10 @@ All application, command-line, and maintenance code is in `streetgeo/`. Old root
 |---|---|---|
 | `python -m streetgeo gui` | Training workbench | `streetgeo.ui.training` |
 | `python -m streetgeo map` | Local prediction map | `streetgeo.ui.prediction` |
-| `python -m streetgeo train` | Training and checkpoint recovery | `streetgeo.training.train` |
+| `python -m streetgeo train` | OSV-5M training and checkpoint recovery | `streetgeo.training.train` |
 | `python -m streetgeo predict` | Image geolocation | `streetgeo.inference.predict` |
-| `python -m streetgeo download` | Mapillary downloads | `streetgeo.datasets.download_mapillary` |
-| `python -m streetgeo prepare` | Dataset import and joint splitting | `streetgeo.datasets.prepare` |
+| `python -m streetgeo download` | Legacy Mapillary collection (not accepted for training) | `streetgeo.datasets.download_mapillary` |
+| `python -m streetgeo prepare` | OSV-5M import and geographic splitting | `streetgeo.datasets.prepare` |
 | `python -m streetgeo split` | JSONL splitting | `streetgeo.datasets.split` |
 | `python -m streetgeo check-gpu` | GPU capacity check | `streetgeo.cli.check_gpu` |
 | `python -m streetgeo refresh-map` | Refresh offline UN-source maps | `streetgeo.maps.refresh` |

@@ -1,4 +1,4 @@
-"""Chinese desktop workbench for Mapillary collection and resumable training."""
+"""Chinese desktop workbench for OpenStreetView-5M import and resumable training."""
 
 import argparse
 from collections import deque
@@ -13,11 +13,12 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from streetgeo.ui.backend import (DATA_SOURCES, DEFAULTS, ROOT, ProcessRunner, build_download, build_prepare,
+from streetgeo.ui.backend import (DEFAULTS, ROOT, ProcessRunner, build_prepare,
                          build_training, load_settings, resolve_path, save_settings)
 
 from streetgeo.ui.common import (BG, PANEL, NAV, TEXT, MUTED, BORDER, ACCENT, FONT,
-                                 label, button, ScrollFrame)
+                                 SURFACE, INPUT, DISABLED, SELECTION, WARNING, CHART_FILL,
+                                 apply_dark_theme, label, button, ScrollFrame)
 
 
 class LossChart(tk.Canvas):
@@ -41,7 +42,7 @@ class LossChart(tk.Canvas):
         left, right, top, bottom = 44, max(70, width - 16), 20, max(60, height - 30)
         for fraction in (0, 0.5, 1):
             y = top + fraction * (bottom - top)
-            self.create_line(left, y, right, y, fill="#edf1f5", dash=(3, 4))
+            self.create_line(left, y, right, y, fill=BORDER, dash=(3, 4))
         if not self.points:
             self.create_text(width / 2, height / 2, text="开始训练后显示损失曲线", fill=MUTED, font=(FONT, 9))
             return
@@ -54,7 +55,7 @@ class LossChart(tk.Canvas):
                      for step, loss in self.points]
         if len(positions) > 1:
             polygon = [positions[0][0], bottom, *[value for point in positions for value in point], positions[-1][0], bottom]
-            self.create_polygon(polygon, fill="#e4f4ef", outline="")
+            self.create_polygon(polygon, fill=CHART_FILL, outline="")
             self.create_line(*[value for point in positions for value in point], fill=ACCENT, width=2)
         x, y = positions[-1]
         self.create_oval(x - 3, y - 3, x + 3, y + 3, fill=ACCENT, outline=PANEL, width=1)
@@ -69,7 +70,6 @@ class TrainingApp:
         self.root = root
         self.settings_path = Path(settings_path) if settings_path else ROOT / ".gui" / "settings.json"
         self.values = {key: tk.StringVar(value=value) for key, value in load_settings(self.settings_path).items()}
-        self.token = tk.StringVar()
         self.events = queue.Queue()
         self.runner = ProcessRunner(self.events)
         self.probe_runner = ProcessRunner(self.events)
@@ -77,7 +77,6 @@ class TrainingApp:
         self.action_buttons = []
         self.active_page, self.active_job = "train", None
         self.total_steps = 0
-        self.download_outcome = None
         self.last_checkpoint = ""
         self.closing = False
         self._build()
@@ -90,18 +89,11 @@ class TrainingApp:
     def _build(self):
         root = self.root
         root.title("StreetGeo · 训练工作台")
-        root.configure(bg=BG)
+        apply_dark_theme(root)
         width = min(1460, int(root.winfo_screenwidth() * 0.9))
         height = min(1020, int(root.winfo_screenheight() * 0.9))
         root.geometry(f"{width}x{height}")
         root.minsize(1080, 780)
-        style = ttk.Style(root)
-        style.theme_use("clam")
-        style.configure("TCombobox", padding=6, fieldbackground=PANEL, foreground=TEXT, font=(FONT, 10))
-        style.map("TCombobox", fieldbackground=[("readonly", PANEL), ("disabled", "#f1f3f6")])
-        style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#e6ecf1", borderwidth=0)
-        style.configure("TCheckbutton", background=PANEL, foreground=MUTED, font=(FONT, 9))
-
         sidebar = tk.Frame(root, bg=NAV, width=196)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
@@ -113,13 +105,13 @@ class TrainingApp:
         brand.create_text(0, 58, text="STREETGEO", anchor="w", fill="white", font=("Segoe UI", 12, "bold"))
         brand.create_text(0, 80, text="TRAINING STUDIO", anchor="w", fill="#8aa4b8", font=("Segoe UI", 8))
         label(sidebar, "工作流程", color="#7f9bad", size=9).pack(fill="x", padx=22, pady=(10, 12))
-        for key, text in (("download", "01   街景数据"), ("split", "02   导入与划分"), ("train", "03   模型训练")):
+        for key, text in (("split", "01   导入与划分"), ("train", "02   模型训练")):
             item = tk.Button(sidebar, text=text, anchor="w", command=lambda key=key: self._show_page(key),
                              font=(FONT, 10), bg=NAV, fg="#bdceda", activebackground="#263e50",
                              activeforeground="white", relief="flat", bd=0, padx=18, pady=14, cursor="hand2")
             item.pack(fill="x", padx=10, pady=3)
             self.nav_buttons[key] = item
-        tk.Button(sidebar, text="04   预测地图", anchor="w", command=self._open_prediction_map,
+        tk.Button(sidebar, text="03   预测地图", anchor="w", command=self._open_prediction_map,
                   font=(FONT, 10), bg=NAV, fg="#bdceda", activebackground="#263e50",
                   activeforeground="white", relief="flat", bd=0, padx=18, pady=14,
                   cursor="hand2").pack(fill="x", padx=10, pady=3)
@@ -127,7 +119,7 @@ class TrainingApp:
         footer.pack(side="bottom", fill="x", padx=20, pady=22)
         label(footer, "本地运行 · 自动保存", color="#7f9bad", size=9).pack(anchor="w", pady=(0, 12))
         for text, command in (("GPU 运行检查", self._gpu_check), ("打开项目目录", lambda: self._open(ROOT)),
-                              ("全球训练计划", lambda: self._open(ROOT / "docs" / "WORLD_TRAINING_PLAN.md"))):
+                              ("OSV-5M 训练指南", lambda: self._open(ROOT / "docs" / "STREETGEO_TRAINING.md"))):
             tk.Button(footer, text=text, command=command, anchor="w", bg=NAV, fg="#bdceda",
                       activebackground=NAV, activeforeground="white", font=(FONT, 9),
                       relief="flat", bd=0, cursor="hand2", pady=6).pack(fill="x")
@@ -156,7 +148,6 @@ class TrainingApp:
         self.page_host.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
         self.page_host.rowconfigure(0, weight=1)
         self.page_host.columnconfigure(0, weight=1)
-        self._build_download()
         self._build_split()
         self._build_train()
         self._build_monitor(upper)
@@ -172,13 +163,14 @@ class TrainingApp:
         text_frame.pack(fill="both", expand=True, padx=16, pady=(0, 12))
         scrollbar = ttk.Scrollbar(text_frame)
         scrollbar.pack(side="right", fill="y")
-        self.log = tk.Text(text_frame, bg="#f8fafc", fg="#3e5264", font=("Consolas", 9), height=7,
-                           wrap="word", bd=0, padx=10, pady=8, state="disabled", yscrollcommand=scrollbar.set)
+        self.log = tk.Text(text_frame, bg=INPUT, fg=TEXT, font=("Consolas", 9), height=7,
+                           wrap="word", bd=0, padx=10, pady=8, state="disabled",
+                           insertbackground=TEXT, selectbackground=SELECTION, selectforeground=TEXT, yscrollcommand=scrollbar.set)
         self.log.pack(side="left", fill="both", expand=True)
         scrollbar.configure(command=self.log.yview)
-        self.footer_text = label(main, "就绪  ·  配置仅保存在本机，访问令牌不落盘", color=MUTED, size=9)
+        self.footer_text = label(main, "就绪  ·  配置仅保存在本机 · 仅接受 OpenStreetView-5M", color=MUTED, size=9)
         self.footer_text.pack(fill="x", pady=(10, 0))
-        self._append_log("欢迎使用 StreetGeo 训练工作台。支持部分 OSV-5M、GSV-Cities、Mapillary 及混合训练。默认模型约 514MiB，升级架构需新建训练。")
+        self._append_log("欢迎使用 StreetGeo 训练工作台。仅支持 OpenStreetView-5M，自动跳过尚未下载的图片。默认模型约 514MiB，升级架构需新建训练。")
 
     def _page(self, key, title, description):
         page = tk.Frame(self.page_host, bg=PANEL)
@@ -198,22 +190,22 @@ class TrainingApp:
         self.pages[key] = page
         return scroll.content, actions
 
-    def _field(self, parent, text, key, row, col=0, span=1, *, choices=None, browse=None, secret=False):
+    def _field(self, parent, text, key, row, col=0, span=1, *, choices=None, browse=None):
         frame = tk.Frame(parent, bg=PANEL)
         frame.grid(row=row, column=col, columnspan=span, sticky="ew", padx=(2, 12), pady=(6, 8))
         frame.columnconfigure(0, weight=1)
         label(frame, text, size=9, color=MUTED).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 5))
-        variable = self.token if secret else self.values[key]
+        variable = self.values[key]
         if choices:
             editor = ttk.Combobox(frame, textvariable=variable, values=choices, state="readonly", width=12)
         else:
-            editor = tk.Entry(frame, textvariable=variable, font=(FONT, 10), bg=PANEL, fg=TEXT,
-                              insertbackground=TEXT, relief="flat", bd=0, width=16,
+            editor = tk.Entry(frame, textvariable=variable, font=(FONT, 10), bg=INPUT, fg=TEXT,
+                              insertbackground=TEXT, selectbackground=SELECTION, selectforeground=TEXT,
+                              relief="flat", bd=0, width=16,
                               highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT,
-                              disabledbackground="#f0f3f6", disabledforeground="#8494a2", show="●" if secret else "")
+                              disabledbackground=SURFACE, disabledforeground=DISABLED)
         editor.grid(row=1, column=0, sticky="ew", ipady=6 if not choices else 0)
-        if not secret:
-            self.editors[key] = editor
+        self.editors[key] = editor
         if browse:
             chooser = button(frame, "选择", lambda: self._browse(key, browse), padx=10, pady=6)
             chooser.grid(row=1, column=1, padx=(8, 0))
@@ -226,63 +218,30 @@ class TrainingApp:
         self.action_buttons.append(item)
         return item
 
-    def _build_download(self):
-        fields, actions = self._page("download", "Mapillary 街景采集", "下载进度自动记录；图片短边不足 224 像素时自动尝试更大版本。")
-        self.token_editor = self._field(fields, "访问令牌（只在本次会话使用）", "token", 0, span=2, secret=True)
-        self._field(fields, "数据保存目录", "dataset_dir", 1, span=2, browse="directory")
-        self._field(fields, "地区 · conus 为本土 48 州及 DC", "region", 2, choices=("conus", "us"))
-        self._field(fields, "州代码（留空表示所选地区全部州）", "states", 2, 1)
-        self._field(fields, "目标图片总数", "max_images", 3)
-        self._field(fields, "优先分辨率（不足时自动提升）", "resolution", 3, 1, choices=("1024", "2048", "256"))
-        self._field(fields, "下载线程数", "download_workers", 4)
-        self._field(fields, "每秒请求数", "requests_per_second", 4, 1)
-        self._field(fields, "图片预算 / GiB", "max_gb", 5)
-        self._field(fields, "至少保留磁盘空间 / GiB", "min_free_gb", 5, 1)
-        self._field(fields, "本次最多查询页数", "max_pages", 6)
-        self._action(actions, "开始 / 继续下载", self._download, primary=True)
-        self._action(actions, "打开数据目录", lambda: self._open(resolve_path(self.values["dataset_dir"].get())))
-
     def _build_split(self):
-        fields, actions = self._page("split", "导入与划分训练数据", "支持部分 OSV-5M、GSV-Cities、Mapillary；混合时不使用的路径留空。")
-        source = self._field(fields, "数据来源", "data_source", 0, span=2, choices=DATA_SOURCES)
-        source.bind("<<ComboboxSelected>>", lambda _: self._source_changed(reset_output=True))
-        self._field(fields, "GSV-Cities 根目录 · 含 Images / Dataframes", "gsv_root", 1, span=2, browse="directory")
-        self._field(fields, "OSV-5M 根目录 · 含 train.csv 或 train/train.csv", "osv_root", 2, span=2, browse="directory")
-        self._field(fields, "Mapillary / 自定义 JSONL 清单", "split_manifest", 3, span=2, browse="manifest")
-        self._field(fields, "划分结果保存目录", "split_output", 4, span=2, browse="directory")
-        self._field(fields, "地理分组大小 / 度", "block_degrees", 5)
-        self._field(fields, "不同集合间的隔离距离 / 米", "guard_m", 5, 1)
-        description = label(fields, "使用全部城市，不按美国边界过滤。约 80% / 10% / 10% 划分。\n同一地点、全景、采集序列和地理块整体分组；跨来源也做近邻隔离。\n训练开始后保持清单及图片不变，扩充数据时换用新的输出目录。", size=9, color=MUTED,
-                            wraplength=500, justify="left")
-        description.configure(text="OSV-5M 只导入本地已解压图片，未下载记录自动跳过并统计。\n按采集序列和地理块整体分组；训练、验证、测试之间隔离近邻。\n原始 test 目录不参与训练；补充图片后使用新的划分输出目录。")
-        description.grid(row=6, column=0, columnspan=2, sticky="w", padx=2, pady=14)
+        fields, actions = self._page("split", "OpenStreetView-5M 导入与划分", "唯一训练数据来源为 OSV-5M；支持只下载部分训练分片。")
+        label(fields, "数据来源：OpenStreetView-5M（固定）", color=ACCENT, size=10).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=2, pady=(8, 12))
+        self._field(fields, "OSV-5M 根目录 · 含 train.csv 或 train/train.csv", "osv_root", 1, span=2, browse="directory")
+        self._field(fields, "划分结果保存目录", "split_output", 2, span=2, browse="directory")
+        self._field(fields, "地理分组大小 / 度", "block_degrees", 3)
+        self._field(fields, "不同集合间的隔离距离 / 米", "guard_m", 3, 1)
+        description = label(fields, "只导入本地已解压的 OSV-5M 训练图片，未下载记录自动跳过并统计。\n按采集序列和地理块整体分组，训练、验证、测试之间隔离近邻。\n官方 test 目录不参与训练；补充图片后使用新的划分输出目录。",
+                            size=9, color=MUTED, wraplength=500, justify="left")
+        description.grid(row=4, column=0, columnspan=2, sticky="w", padx=2, pady=14)
         self.split_summary = label(fields, "尚未生成数据划分", size=10, color=ACCENT, wraplength=500)
-        self.split_summary.grid(row=7, column=0, columnspan=2, sticky="w", padx=2, pady=8)
+        self.split_summary.grid(row=5, column=0, columnspan=2, sticky="w", padx=2, pady=8)
         self._action(actions, "导入并生成划分", self._prepare, primary=True)
         self._action(actions, "填入训练配置", self._use_splits)
-        self._source_changed()
-
-    def _source_changed(self, reset_output=False):
-        source = self.values["data_source"].get()
-        for key, enabled in (("gsv_root", source in (DATA_SOURCES[0], DATA_SOURCES[2])),
-                             ("osv_root", source in (DATA_SOURCES[3], DATA_SOURCES[2])),
-                             ("split_manifest", source in (DATA_SOURCES[1], DATA_SOURCES[2]))):
-            self.editors[key].configure(state="normal" if enabled else "disabled")
-            self.browse_buttons[key].configure(state="normal" if enabled else "disabled")
-        if reset_output:
-            folder = {DATA_SOURCES[0]: "data/world_gsv", DATA_SOURCES[1]: "data/prepared_mapillary",
-                      DATA_SOURCES[2]: "data/world_mixed", DATA_SOURCES[3]: "data/world_osv_514m"}.get(source, "data/world_training")
-            self.values["split_output"].set(folder)
-            self.values["block_degrees"].set("0.25" if source == DATA_SOURCES[1] else "0.02")
 
     def _build_train(self):
-        fields, actions = self._page("train", "全球街景训练", "新建默认约 514MiB / 1.35 亿参数；续训沿用权重架构。单视角 · 224×224 · BF16。")
+        fields, actions = self._page("train", "OSV-5M 全球街景训练", "新建默认约 514MiB / 1.35 亿参数；续训沿用权重架构。单视角 · 224×224 · BF16。")
         editor = self._field(fields, "运行方式", "mode", 0, choices=("新建训练", "继续上次训练"))
         editor.bind("<<ComboboxSelected>>", lambda _: self._mode_changed())
         self._field(fields, "训练设备", "device", 0, 1, choices=("cuda", "auto", "cpu"))
         self._field(fields, "恢复进度 / *.last.pt", "resume", 1, span=2, browse="checkpoint")
-        self._field(fields, "训练清单", "train_manifest", 2, span=2, browse="manifest")
-        self._field(fields, "验证清单（可留空）", "val_manifest", 3, span=2, browse="manifest")
+        self._field(fields, "OSV-5M 训练清单", "train_manifest", 2, span=2, browse="manifest")
+        self._field(fields, "OSV-5M 验证清单（可留空）", "val_manifest", 3, span=2, browse="manifest")
         self._field(fields, "最佳模型输出文件", "output", 4, span=2, browse="save_checkpoint")
         self._field(fields, "训练轮数 / epochs", "epochs", 5)
         self._field(fields, "批次大小 / batch size", "batch_size", 5, 1)
@@ -321,7 +280,7 @@ class TrainingApp:
         self.metric_labels = {}
         for number, (key, title) in enumerate((("step", "已完成批次"), ("epoch", "当前轮次"),
                                               ("loss", "训练损失"), ("distance", "验证中位误差 / km"))):
-            cell = tk.Frame(metrics, bg="#f7f9fb", padx=12, pady=10)
+            cell = tk.Frame(metrics, bg=SURFACE, padx=12, pady=10)
             cell.grid(row=number // 2, column=number % 2, sticky="ew", padx=(0, 8) if number % 2 == 0 else (0, 0), pady=4)
             label(cell, title, size=8, color=MUTED).pack(anchor="w")
             value = label(cell, "—", size=18, bold=True)
@@ -357,12 +316,11 @@ class TrainingApp:
         self.active_page = key
         self.pages[key].tkraise()
         titles = {"train": ("模型训练", "设置训练参数，随时保存进度并继续。"),
-                  "download": ("街景数据", "收集美国 Mapillary 街景，自动记录下载进度。"),
-                  "split": ("数据导入与划分", "OSV-5M / GSV-Cities / Mapillary · 全球坐标 · 地点隔离。")}
+                  "split": ("数据导入与划分", "仅 OpenStreetView-5M · 全球坐标 · 地点隔离。")}
         self.page_title.configure(text=titles[key][0])
         self.page_subtitle.configure(text=titles[key][1])
         for name, item in self.nav_buttons.items():
-            item.configure(bg="#254d55" if name == key else NAV, fg="white" if name == key else "#bdceda")
+            item.configure(bg=SELECTION if name == key else NAV, fg="white" if name == key else "#bdceda")
 
     def _browse(self, key, kind):
         existing = resolve_path(self.values[key].get())
@@ -392,8 +350,8 @@ class TrainingApp:
 
     def _error(self, message):
         if not self.active_job:
-            self.status_badge.configure(text="●  请检查配置", fg="#b35a24")
-            self.detail_label.configure(text=str(message), fg="#b35a24")
+            self.status_badge.configure(text="●  请检查配置", fg=WARNING)
+            self.detail_label.configure(text=str(message), fg=WARNING)
         self._append_log("[配置] " + str(message))
 
     def _lock_controls(self, locked):
@@ -401,10 +359,8 @@ class TrainingApp:
             editor.configure(state="disabled" if locked else ("readonly" if isinstance(editor, ttk.Combobox) else "normal"))
         for item in (*self.browse_buttons.values(), *self.action_buttons):
             item.configure(state="disabled" if locked else "normal")
-        self.token_editor.configure(state="disabled" if locked else "normal")
         if not locked:
             self._mode_changed()
-            self._source_changed()
 
     def _start(self, job, module, arguments, *, stop_file=None, extra_env=None):
         if self.runner.busy:
@@ -417,31 +373,15 @@ class TrainingApp:
             return
         self.active_job = job
         self.total_steps = 0
-        self.download_outcome = None
         self._persist()
         self._lock_controls(True)
         self.stop_button.configure(state="normal" if stop_file else "disabled", text="停止并保存")
         self.progress.configure(mode="indeterminate")
         self.progress.start(12)
-        names = {"download": "街景下载中", "split": "正在导入与划分数据", "train": "训练启动中", "inspect": "正在读取 checkpoint", "gpu": "正在检查 GPU"}
+        names = {"split": "正在导入与划分数据", "train": "训练启动中", "inspect": "正在读取 checkpoint", "gpu": "正在检查 GPU"}
         self.task_label.configure(text=names[job])
         self.status_badge.configure(text="●  运行中", fg=ACCENT)
         self.detail_label.configure(text="后台任务正在运行，日志将在下方显示。", fg=MUTED)
-
-    def _download(self):
-        try:
-            token = self.token.get().strip() or os.environ.get("MAPILLARY_ACCESS_TOKEN", "")
-            if not token:
-                raise ValueError("请先填写 Mapillary 访问令牌，或设置本机 MAPILLARY_ACCESS_TOKEN 环境变量。")
-            stop = self.runner.new_stop_file()
-            arguments = build_download(self._settings(), stop)
-            self.values["split_manifest"].set(str(resolve_path(self.values["dataset_dir"].get()) / "all.jsonl"))
-            self.values["data_source"].set(DATA_SOURCES[1])
-            self.values["split_output"].set("data/prepared_mapillary")
-            self._start("download", "streetgeo.datasets.download_mapillary", arguments, stop_file=stop,
-                        extra_env={"MAPILLARY_ACCESS_TOKEN": token})
-        except ValueError as error:
-            self._error(error)
 
     def _prepare(self):
         try:
@@ -455,21 +395,25 @@ class TrainingApp:
         if not all((output / name).is_file() for name in ("train.jsonl", "val.jsonl", "test.jsonl")):
             self._error("请先生成完整的训练、验证和测试清单。")
             return
+        from streetgeo.datasets.policy import check_osv_manifest_header
+        try:
+            for name in ("train", "val", "test"):
+                check_osv_manifest_header(output / f"{name}.jsonl")
+        except (ValueError, OSError) as error:
+            self._error(str(error))
+            return
         self.values["train_manifest"].set(str(output / "train.jsonl"))
         self.values["val_manifest"].set(str(output / "val.jsonl"))
         self.values["mode"].set("新建训练")
-        if self.values["data_source"].get() != DATA_SOURCES[1]:
-            source = self.values["data_source"].get()
-            name = ("world_mixed" if source == DATA_SOURCES[2] else
-                    "streetgeo_514m_osv" if source == DATA_SOURCES[3] else "world_gsv")
-            candidate = ROOT / "checkpoints" / name / "best.pt"
-            suffix = 2
-            while candidate.exists() or candidate.with_name("best.last.pt").exists():
-                candidate = ROOT / "checkpoints" / f"{name}_{suffix}" / "best.pt"
-                suffix += 1
-            self.values["output"].set(str(candidate))
-            self.values["resume"].set(str(candidate.with_name("best.last.pt")))
-            self.values["init_from"].set("")
+        name = "streetgeo_514m_osv"
+        candidate = ROOT / "checkpoints" / name / "best.pt"
+        suffix = 2
+        while candidate.exists() or candidate.with_name("best.last.pt").exists():
+            candidate = ROOT / "checkpoints" / f"{name}_{suffix}" / "best.pt"
+            suffix += 1
+        self.values["output"].set(str(candidate))
+        self.values["resume"].set(str(candidate.with_name("best.last.pt")))
+        self.values["init_from"].set("")
         self._mode_changed()
         self._show_page("train")
         self._persist()
@@ -489,7 +433,7 @@ class TrainingApp:
     def _stop(self):
         if self.runner.request_stop():
             self.stop_button.configure(state="disabled", text="正在等待安全停止…")
-            self.status_badge.configure(text="●  正在保存", fg="#b35a24")
+            self.status_badge.configure(text="●  正在保存", fg=WARNING)
             self.detail_label.configure(text="当前批次或网络请求结束后保存进度，请稍候。", fg=MUTED)
             self._append_log("[控制] 已请求安全停止，正在等待进度保存。")
 
@@ -547,8 +491,6 @@ class TrainingApp:
             self.detail_label.configure(text=f"已准备 {data['samples']:,} 张 · " +
                                              " / ".join(f"{key}: {value:,}" for key, value in data["source_counts"].items()), fg=ACCENT)
         event = data.get("event")
-        if event == "download_finished":
-            self.download_outcome = data.get("status")
         if event == "hardware":
             gpu = data["gpu"].replace("NVIDIA GeForce ", "")
             self.hardware.configure(text=f"{gpu} · {data['vram_gib']:.0f} GB\nPyTorch {data['torch']} · 可用磁盘 {data['disk_free_gib']:.0f} GiB")
@@ -598,14 +540,6 @@ class TrainingApp:
             self.values["resume"].set(data["checkpoint"])
             self.checkpoint_label.configure(text=f"最近保存：{datetime.now():%H:%M:%S}\n{Path(data['checkpoint']).name}")
             self._persist()
-        if "downloaded" in data:
-            count, target = data["downloaded"], int(self.values["max_images"].get())
-            self.progress.stop()
-            self.progress.configure(mode="determinate", value=min(100, count / target * 100))
-            self.metric_labels["step"].configure(text=f"{count:,}")
-            self.detail_label.configure(text=f"已下载 {count:,} / {target:,} 张 · {data.get('bytes', 0) / 1024 ** 3:.2f} GiB · "
-                                             f"失败待重试 {data.get('failed', 0)} · 尺寸不足跳过 {data.get('skipped', 0)} · "
-                                             f"待重试区域 {data.get('deferred_regions', 0)}", fg=MUTED)
 
     def _finished(self, job, result):
         if job == "hardware":
@@ -618,13 +552,13 @@ class TrainingApp:
         self._lock_controls(False)
         self.stop_button.configure(state="disabled", text="停止并保存")
         if result["returncode"] != 0:
-            self.status_badge.configure(text="●  执行失败", fg="#b35a24")
+            self.status_badge.configure(text="●  执行失败", fg=WARNING)
             self.task_label.configure(text="任务未完成")
-            self.detail_label.configure(text="请查看下方日志中的错误信息，已有 checkpoint 和下载进度仍保留。", fg="#b35a24")
+            self.detail_label.configure(text="请查看下方日志中的错误信息，已有 checkpoint 和数据划分仍保留。", fg=WARNING)
         elif result["stopped"]:
             self.status_badge.configure(text="●  已安全停止", fg=ACCENT)
             self.task_label.configure(text="进度已保存")
-            self.detail_label.configure(text="可选择继续下载，或切换为“继续上次训练”。", fg=MUTED)
+            self.detail_label.configure(text="可切换为“继续上次训练”，或重新执行数据准备。", fg=MUTED)
             if job == "train":
                 self.values["mode"].set("继续上次训练")
                 self._mode_changed()
@@ -632,17 +566,6 @@ class TrainingApp:
             elif job == "split":
                 self.task_label.configure(text="数据准备已停止")
                 self.detail_label.configure(text="可重新执行导入；原始图片和已有划分均保留。", fg=MUTED)
-        elif job == "download" and self.download_outcome not in (None, "target_reached"):
-            descriptions = {
-                "paused": "部分查询暂不可用，进度已保存；稍后点击继续下载。",
-                "discovery_limit": "已达到本次查询页数预算，进度已保存；可继续下载或增加页数预算。",
-                "budget_limit": "已达到磁盘预算或剩余空间限制，进度已保存；调整预算后可继续。",
-                "source_exhausted": "所选区域在当前采样限制下已查询完，图片数量未达到目标。",
-                "stopped": "下载已安全停止，进度已保存。",
-            }
-            self.status_badge.configure(text="●  本次下载已结束", fg="#b35a24")
-            self.task_label.configure(text="进度已保存")
-            self.detail_label.configure(text=descriptions.get(self.download_outcome, "任务未完成，请查看日志。"), fg=MUTED)
         else:
             self.status_badge.configure(text="●  已完成", fg=ACCENT)
             self.task_label.configure(text="任务完成")

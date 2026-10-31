@@ -9,6 +9,7 @@ from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 
 from streetgeo.core.config import ModelConfig
+from streetgeo.datasets.policy import require_osv_row
 
 IMAGE_MEAN = (0.485, 0.456, 0.406)
 IMAGE_STD = (0.229, 0.224, 0.225)
@@ -47,7 +48,7 @@ class StreetViewDataset(Dataset):
     contain null for unknown directions. Relative paths resolve beside JSONL.
     """
 
-    def __init__(self, manifest_path, config=None):
+    def __init__(self, manifest_path, config=None, *, osv5m_only=False):
         self.config = config or ModelConfig()
         manifest = Path(manifest_path).resolve()
         self.samples = []
@@ -58,6 +59,8 @@ class StreetViewDataset(Dataset):
                 continue
             try:
                 row = json.loads(line)
+                if osv5m_only:
+                    require_osv_row(row)
                 if not isinstance(row, dict):
                     raise ValueError("each row must be a JSON object")
                 if "images" in row and "image" in row:

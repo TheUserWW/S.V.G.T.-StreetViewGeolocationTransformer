@@ -113,7 +113,7 @@ class PartialOSVTests(unittest.TestCase):
     def test_gui_osv_source_does_not_require_other_datasets(self):
         with tempfile.TemporaryDirectory() as folder:
             root = osv_fixture(folder)
-            values = dict(DEFAULTS, data_source=DATA_SOURCES[3], osv_root=str(root),
+            values = dict(DEFAULTS, data_source=DATA_SOURCES[0], osv_root=str(root),
                           gsv_root="missing", split_manifest="missing", split_output=str(Path(folder) / "out"))
             args = build_prepare(values)
             self.assertEqual(args[args.index("--dataset-root") + 1], str(root.resolve()))
@@ -127,11 +127,11 @@ class PartialOSVTests(unittest.TestCase):
             root.withdraw()
             app = TrainingApp(root, settings_path=Path(folder) / "settings.json", probe=False)
             try:
-                app.values["data_source"].set(DATA_SOURCES[3])
-                app._source_changed(reset_output=True)
+                app.values["data_source"].set(DATA_SOURCES[0])
                 self.assertEqual(str(app.editors["osv_root"].cget("state")), "normal")
-                self.assertEqual(str(app.editors["gsv_root"].cget("state")), "disabled")
-                self.assertEqual(str(app.editors["split_manifest"].cget("state")), "disabled")
+                self.assertNotIn("gsv_root", app.editors)
+                self.assertNotIn("split_manifest", app.editors)
+                self.assertNotIn("download", app.pages)
                 self.assertEqual(app.values["split_output"].get(), "data/world_osv_514m")
                 app._structured({"event": "dataset_import_progress", "stage": "metadata", "metadata_rows": 100,
                                  "local_images": 12, "samples": 8, "missing_images": 92})

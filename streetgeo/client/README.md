@@ -9,6 +9,12 @@
 
 Requires Windows x64 and **64-bit Python 3.10–3.15** with the standard Tcl/Tk components; Python 3.12 is recommended. Inference uses the CPU and does not require an NVIDIA GPU or CUDA. A trained `best.pt` is included, so training data is unnecessary. The launcher chooses PyTorch CPU dependencies according to the Python version.
 
+The client opens in a dark theme, including its controls and offline map. Imported images and screenshots retain their original colors.
+
+Map geometry is cached for panning. Place names adapt to zoom and available space, hide while dragging, and return after release. Online roads use the tile provider's labels without duplicate offline names.
+
+Prediction always covers the world, independently of map position or zoom. The map opens in a global overview and returns to it after each result. Selecting a candidate changes its highlight; use the locate-candidate button for a closer view. Model-result JSON includes `prediction_scope: "world"`.
+
 Images and inference remain local. Offline maps work without network access. Only enabling the optional online road basemap requests OpenStreetMap tiles for the current viewport.
 
 Screenshot calibration accepts a game-map screenshot and at least three corresponding point pairs, then marks a suggested location for manual placement in the game.

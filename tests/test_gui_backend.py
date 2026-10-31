@@ -12,7 +12,7 @@ from PIL import Image
 
 from streetgeo.core.checkpoints import read_checkpoint
 from streetgeo.datasets.download_mapillary import collect
-from streetgeo.ui.backend import (DEFAULTS, ProcessRunner, build_download, build_prepare, build_training,
+from streetgeo.ui.backend import (DEFAULTS, ProcessRunner, build_prepare, build_training,
                          load_settings, save_settings)
 from test_model import tiny_config
 from test_mapillary import FakeBoundary, FakeClient, args_for
@@ -41,18 +41,13 @@ class GuiBackendTests(unittest.TestCase):
     def test_file_paths_with_spaces_are_passed_as_single_arguments(self):
         with tempfile.TemporaryDirectory(prefix="训练 资料 ") as folder:
             manifest = Path(folder) / "训练 清单.jsonl"
-            manifest.touch()
+            manifest.write_text(json.dumps({"image": "1.png", "osv5m_id": "1", "source": "OpenStreetView-5M", "latitude": 0, "longitude": 0}), encoding="utf-8")
             values = dict(DEFAULTS, train_manifest=str(manifest), val_manifest="", output=str(Path(folder) / "新模型.pt"),
                           device="cpu", amp="off")
             arguments = build_training(values, Path(folder) / "stop")
             self.assertEqual(arguments[arguments.index("--train-manifest") + 1], str(manifest))
 
     def test_invalid_config_rejected_before_starting_process(self):
-        values = dict(DEFAULTS, max_images="-1")
-        with self.assertRaises(ValueError):
-            build_download(values, "stop")
-        with self.assertRaises(ValueError):
-            build_download(dict(DEFAULTS, requests_per_second="nan"), "stop")
         with self.assertRaises(ValueError):
             build_prepare(dict(DEFAULTS, data_source="Mapillary / JSONL", split_manifest="nonexistent.jsonl"))
 
@@ -110,7 +105,8 @@ class GuiBackendTests(unittest.TestCase):
             rows = []
             for index in range(6):
                 Image.new("RGB", (32, 32), (index * 30, 100, 140)).save(folder / f"{index}.png")
-                rows.append({"image": f"{index}.png", "latitude": 30 + index, "longitude": -120 + index})
+                rows.append({"image": f"{index}.png", "latitude": 30 + index, "longitude": -120 + index,
+                             "source": "OpenStreetView-5M", "osv5m_id": str(index)})
             manifest = folder / "train.jsonl"
             manifest.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
             model_config = folder / "model.json"

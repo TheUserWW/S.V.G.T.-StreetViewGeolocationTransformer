@@ -2,9 +2,9 @@
 
 StreetGeo converts local street-view images into geographic locations. It outputs decimal coordinates accepted by Google Maps: `latitude, longitude`, for example `34.052200, -118.243700`. This example illustrates the format only.
 
-The default model has **134,686,730 parameters and approximately 513.8 MiB of FP32 weights**: width 768, 12 attention heads, 15 visual layers, and 2 fusion layers. It supports partially downloaded OpenStreetView-5M, GSV-Cities, Mapillary JSONL, and mixed datasets. The larger architecture requires a new training run. Existing approximately 80 MiB models remain usable with their saved architecture; they do not automatically become larger models. See the [training guide](docs/STREETGEO_TRAINING.md). Model size and short capacity checks do not establish localization accuracy.
+The default model has **134,686,730 parameters and approximately 513.8 MiB of FP32 weights**: width 768, 12 attention heads, 15 visual layers, and 2 fusion layers. Training accepts only OpenStreetView-5M, including partial image downloads. GSV-Cities, standalone Mapillary, mixed-source, and custom JSONL training inputs are rejected. The larger architecture requires a new training run. Existing approximately 80 MiB models remain usable with their saved architecture; they do not automatically become larger models. See the [training guide](docs/STREETGEO_TRAINING.md). Model size and short capacity checks do not establish localization accuracy.
 
-All runtime code is in `streetgeo/`, launched with `python -m streetgeo <command>`. See [project structure](docs/PROJECT_STRUCTURE.md) for directories and commands. The two root `.bat` launchers open the training workbench and prediction map. Map resources are in `assets/maps/`; model configurations are in `configs/`.
+All runtime code is in `streetgeo/`, launched with `python -m streetgeo <command>`. See [project structure](docs/PROJECT_STRUCTURE.md) for directories and commands. The two root `.bat` launchers open the training workbench and prediction map. Both windows use a dark theme, including forms, dropdowns, logs, charts, and the offline map. Restart an existing window to load the theme. Map resources are in `assets/maps/`; model configurations are in `configs/`.
 
 ```powershell
 .venv\Scripts\python.exe -m streetgeo --help
@@ -66,27 +66,18 @@ uv pip install --python .venv\Scripts\python.exe -r requirements.txt
 
 ## Local training data
 
-Workbench page 02 supports **OpenStreetView-5M, GSV-Cities, Mapillary, and mixed data**. The OSV-5M importer matches CSV string IDs to local filenames, streams coordinate records, skips undownloaded images, and reports their count. Only the official training partition is imported. Missing GSV-Cities or custom JSONL images remain errors to protect existing experiments. Sources can be grouped jointly by capture sequence and geographic block, with nearby samples excluded across splits. After adding images, use a new output directory rather than changing data for an active run.
+Workbench page 01 imports **OpenStreetView-5M only**. Select its extracted root containing `train.csv` or `train/train.csv`. The importer matches CSV string IDs to local filenames, streams coordinate records, skips undownloaded images, and reports their count. Only the official training partition is imported. Capture sequences and geographic blocks are grouped with nearby samples excluded across splits. After adding images, use a new output directory rather than changing data for an active run.
 
 ```powershell
 .venv\Scripts\python.exe -m streetgeo prepare --dataset-root data/OpenStreetView-5M --output-dir data/world_osv_514m
 .venv\Scripts\python.exe -m streetgeo train --train-manifest data/world_osv_514m/train.jsonl --val-manifest data/world_osv_514m/val.jsonl --model-config configs/streetgeo_514m.json --output checkpoints/streetgeo_514m_osv/best.pt --epochs 4 --batch-size 64 --num-workers 4 --device cuda --amp bf16
 ```
 
-Each JSONL line describes one location. Image paths are relative to the manifest directory. `python -m streetgeo download` can generate this format:
+The importer generates `train.jsonl`, `val.jsonl`, `test.jsonl`, and a split report. These JSONL files are internal OSV-5M training inputs, not a general-purpose dataset interface. Every training and validation record must identify `source` as `OpenStreetView-5M`, retain its string `osv5m_id`, and point to the matching single image. Training checks every record, including when resuming; unrelated or mixed manifests are rejected before model training begins. Use the importer rather than manually converting other datasets into this format.
 
-```jsonl
-{"image":"images/front.jpg","latitude":34.0522,"longitude":-118.2437}
-{"images":["images/north.jpg","images/east.jpg"],"latitude":-33.8688,"longitude":151.2093,"headings":[0,90]}
-```
+Images receive EXIF orientation correction, RGB conversion, aspect-preserving resizing with padding, and normalization. Horizontal flipping is disabled to preserve driving-side and text cues. Independent validation uses location/sequence grouping and geographic separation. With validation data, the best model is selected by median validation distance; otherwise it is selected by training loss.
 
-`headings` is optional, and individual entries may be `null` for unknown headings. Angles run clockwise from north. Images receive EXIF orientation correction, RGB conversion, aspect-preserving resizing with padding, and normalization. Horizontal flipping is disabled to preserve driving-side and text cues.
-
-```powershell
-.venv\Scripts\python.exe -m streetgeo train --train-manifest data/train.jsonl --val-manifest data/val.jsonl --epochs 20 --batch-size 8
-```
-
-Split validation data by location or panorama to prevent views of the same place appearing in both training and validation. `python -m streetgeo split` groups capture sequences and geographic blocks and excludes nearby samples across splits. With validation data, the best model is selected by median validation distance; otherwise it is selected by training loss. Checkpoints include their model configuration. Weights from different architectures cannot be mixed. See `streetgeo/core/config.py` for model settings; `--model-config custom.json` overrides configuration fields.
+Checkpoints include their model configuration. Existing trained weights may still initialize a new OSV-5M stage using `--init-from`, provided the architecture matches. Existing inference models remain usable. Exact resume requires unchanged OSV-5M training/validation manifests; old runs using other datasets are rejected. `--model-config custom.json` overrides model settings; see `streetgeo/core/config.py`.
 
 Training periodically writes checkpoints atomically and retains the preceding full state. For example, an output named `checkpoints/streetgeo.pt` uses `checkpoints/streetgeo.last.pt` and `streetgeo.last.previous.pt`. Press Ctrl+C once to finish the current batch, save, and exit. After power loss or forced termination, resume the latest committed state:
 
@@ -100,14 +91,14 @@ Resume state includes the optimizer, AMP scaler, random generators, learning-rat
 
 ### Local prediction map
 
-Open the root prediction-map `.bat` launcher, select page 04 in the training workbench, or run:
+Open the root prediction-map `.bat` launcher, select page 03 in the training workbench, or run:
 
 ```powershell
 .venv\Scripts\python.exe -m streetgeo map
 ```
 
 1. Import 1–4 perspective views of the same location, select a trained visual checkpoint such as `checkpoints/us_pilot/best.pt`, and start prediction. Both best-weight files and full resume checkpoints support inference. Weights load on the first prediction and are reused until the file changes.
-2. Select among the top five candidates. The map displays numbered markers and supports zooming, panning, copying coordinates, and exporting JSON. Grid probabilities are not calibrated correctness estimates.
+2. Predictions always rank geographic cells worldwide, independently of map position or zoom. The window opens in a global overview and returns to that overview after each result, keeping candidates from all regions. Selecting a candidate updates its highlight without changing the viewport; use the locate-candidate button to inspect it locally. The map displays numbered markers and supports zooming, panning, copying coordinates, and exporting JSON. Grid probabilities are not calibrated correctness estimates.
 3. The offline world map uses **UN Geospatial / OCHA country polygons and boundary lines**, including source geometry and labels for China. Source line styles distinguish solid and dashed boundaries; Census US state boundaries are also included. The source does not imply UN endorsement of boundaries or territorial status. Optional online roads use independent OpenStreetMap tiles and their boundary depiction. Tiles follow HTTP cache lifetimes and are not prefetched in bulk. Only tile-location requests leave the machine; street-view images and inference remain local. See [map resources](assets/README.md).
 4. Before training, use manual coordinates in `latitude, longitude` format to test markers and screenshot projection. Manual results are labeled as such; random predictions are not substituted for trained results.
 

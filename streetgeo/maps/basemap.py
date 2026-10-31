@@ -88,3 +88,27 @@ def load_boundaries():
             for segment in projected_segments(line):
                 result.append((segment, _bounds(segment), props))
     return result
+
+
+@lru_cache(maxsize=16)
+def display_geometry(kind, zoom):
+    """Cache subpixel simplification for display without changing source geometry."""
+    from shapely.geometry import LineString
+
+    original = (load_boundaries() if kind == "boundaries" else
+                load_shapes("us_states.geojson" if kind == "states" else "un_countries.geojson"))
+    size = 256 * 2 ** zoom
+    tolerance = 0.65 / size
+    result = []
+    for points, bounds, props in original:
+        x0, y0, x1, y1 = bounds
+        # Tiny islands/segments reappear at larger zoom levels.
+        if max(x1 - x0, y1 - y0) * size < 1.5:
+            continue
+        # At street scale, retain source detail and avoid simplifying an entire world
+        # for a viewport that contains only a handful of source features.
+        simplified = (tuple(points) if zoom >= 7 else
+                      tuple(LineString(points).simplify(tolerance, preserve_topology=False).coords))
+        if len(simplified) >= (2 if kind == "boundaries" else 3):
+            result.append((simplified, bounds, props))
+    return tuple(result)

@@ -56,12 +56,13 @@ class InferenceEngine:
             self.key = key
         if not 1 <= len(images) <= self.model.config.max_views:
             raise ValueError(f"此模型支持同一地点的 1～{self.model.config.max_views} 张图片")
-        progress("正在分析街景…")
+        progress("正在全球范围内分析街景…")
         results = predict_images(self.model, images, top_k=min(int(top_k), self.model.config.total_cells))
         if next(self.model.parameters()).is_cuda:
             torch.cuda.synchronize()
         return {
-            "source": "model", "checkpoint": str(path), "checkpoint_mtime_ns": stamp.st_mtime_ns,
+            "source": "model", "prediction_scope": "world",
+            "checkpoint": str(path), "checkpoint_mtime_ns": stamp.st_mtime_ns,
             "images": [str(Path(image).resolve()) for image in images],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "device": str(next(self.model.parameters()).device), "reused_model": reused,

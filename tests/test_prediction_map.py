@@ -121,6 +121,7 @@ class InferenceTests(unittest.TestCase):
             cached_model = engine.model
             second = engine.predict(checkpoint, [image], device="cpu")
             self.assertEqual(len(first["candidates"]), 5)
+            self.assertEqual(first["prediction_scope"], "world")
             self.assertEqual(first["candidates"], second["candidates"])
             self.assertFalse(first["reused_model"])
             self.assertTrue(second["reused_model"])
@@ -149,6 +150,39 @@ class GuiIntegrationTests(unittest.TestCase):
     def tearDown(self):
         self.app.close()
         self.folder.cleanup()
+
+    def test_prediction_keeps_all_global_candidates_and_opens_world_overview(self):
+        app = self.app
+        self.root.deiconify()
+        self.root.update()
+        self.assertTrue(app.map._world_overview)
+        # A local viewport must never become a filter for later model results.
+        app.map.focus(38, -98, 8)
+        places = [(-33.8688, 151.2093), (35.6762, 139.6503),
+                  (-23.5505, -46.6333), (51.5072, -0.1276), (0, -179.9)]
+        candidates = [{"latitude": lat, "longitude": lon,
+                       "coordinates": f"{lat:.6f}, {lon:.6f}", "cell_probability": .1}
+                      for lat, lon in places]
+        app.show_result({"source": "model", "prediction_scope": "world", "candidates": candidates})
+        self.root.update()
+        self.assertEqual(app.candidates, candidates)
+        self.assertEqual(app.candidate_list.size(), len(places))
+        self.assertTrue(app.map._world_overview)
+        for lat, lon in places:
+            x, y = app.map.to_screen(lat, lon)
+            self.assertTrue(0 <= x <= app.map.winfo_width())
+            self.assertTrue(0 <= y < app.map.winfo_height() - 44)
+        view = (app.map.center, app.map.zoom)
+        app.candidate_list.selection_clear(0, "end")
+        app.candidate_list.selection_set(2)
+        app.select_candidate()
+        self.assertEqual((app.map.center, app.map.zoom), view)
+        self.assertEqual(app.selected, 2)
+        app.focus_candidate()
+        self.assertFalse(app.map._world_overview)
+        self.assertEqual(app.candidates, candidates)
+        app.world_view()
+        self.assertTrue(app.map._world_overview)
 
     def test_manual_result_and_screenshot_calibration_survive_preview_resize(self):
         app = self.app

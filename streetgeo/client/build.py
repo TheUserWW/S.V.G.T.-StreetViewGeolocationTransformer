@@ -10,7 +10,7 @@ from streetgeo.paths import ROOT
 
 PACKAGE_FILES = (
     "__init__.py", "paths.py", "core/__init__.py", "core/config.py", "core/model.py",
-    "core/geography.py", "core/checkpoints.py", "datasets/__init__.py", "datasets/images.py",
+    "core/geography.py", "core/checkpoints.py", "datasets/__init__.py", "datasets/images.py", "datasets/policy.py",
     "inference/__init__.py", "inference/backend.py", "inference/predict.py", "maps/__init__.py",
     "maps/basemap.py", "maps/projection.py", "maps/widgets.py", "ui/__init__.py", "ui/common.py", "ui/prediction.py",
 )

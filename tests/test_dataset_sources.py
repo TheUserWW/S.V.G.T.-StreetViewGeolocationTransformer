@@ -11,11 +11,9 @@ import unittest
 from PIL import Image
 
 from streetgeo.core.checkpoints import read_checkpoint
-from streetgeo.datasets.images import StreetViewDataset, collate_streetviews
-from streetgeo.datasets.sources import PreparationCancelled, iter_gsv_cities
+from streetgeo.datasets.images import StreetViewDataset
 from streetgeo.ui.backend import DATA_SOURCES, DEFAULTS, build_prepare
-from streetgeo.datasets.prepare import file_digest, prepare_datasets
-from streetgeo.datasets.split import create_splits
+from streetgeo.datasets.prepare import prepare_datasets
 from test_model import tiny_config
 
 
@@ -59,124 +57,49 @@ def mapillary_fixture(folder):
 
 
 class DatasetSourceTests(unittest.TestCase):
-    def test_historical_coordinate_jitter_does_not_merge_an_entire_city(self):
-        rows = []
-        for place in range(10):
-            for offset in (-.0001, .0001):
-                rows.append({"latitude": 40, "longitude": -120 + place * .02 + offset,
-                             "source": "GSV-Cities", "city": "City", "place_id": str(place),
-                             "group_id": f"gsv:City:{place}"})
-        splits, report = create_splits(rows, block_degrees=.02, guard_m=0, stratify_cities=True)
-        self.assertEqual(report["groups"], 10)
-        self.assertTrue(all(splits.values()))
-        owners = {}
-        for name, part in splits.items():
-            for row in part:
-                self.assertEqual(owners.setdefault(row["group_id"], name), name)
-
-    def test_city_stratification_represents_each_city_in_every_split(self):
-        rows = []
-        for city, latitude in (("North", 40), ("South", -30)):
-            for place in range(20):
-                rows.append({"latitude": latitude, "longitude": place,
-                             "source": "GSV-Cities", "city": city, "group_id": f"{city}:{place}"})
-        splits, _ = create_splits(rows, block_degrees=.02, guard_m=0, stratify_cities=True)
-        for part in splits.values():
-            self.assertEqual({row["city"] for row in part}, {"North", "South"})
-
-    def test_gsv_handles_global_places_historical_views_and_filename_metadata(self):
+    def test_prepare_rejects_gsv_mapillary_jsonl_and_mixed_sources(self):
+        from test_osv5m import osv_fixture
         with tempfile.TemporaryDirectory() as folder:
-            root = gsv_fixture(folder)
-            report = {}
-            rows = list(iter_gsv_cities(root, report=report))
-            self.assertEqual(len(rows), 24)
-            self.assertEqual(report["places"], 12)
-            self.assertTrue(any(row["latitude"] < 0 and row["longitude"] > 0 for row in rows))
-            self.assertEqual({row["headings"][0] for row in rows}, {5, 353})
-            self.assertTrue(all("image" in row and "images" not in row for row in rows))
-            self.assertTrue(all(Path(row["image"]).is_file() for row in rows))
-            north = [row for row in rows if row["city"] == "North_City" and row["place_id"] == "0"]
-            south = [row for row in rows if row["city"] == "South" and row["place_id"] == "0"]
-            self.assertEqual(north[0]["group_id"], north[1]["group_id"])
-            self.assertNotEqual(north[0]["group_id"], south[0]["group_id"])
+            gsv, mapillary, osv = gsv_fixture(folder), mapillary_fixture(folder), osv_fixture(folder)
+            output = Path(folder) / "rejected"
+            for roots in ([gsv], [mapillary], [osv, gsv], [osv, mapillary]):
+                with self.subTest(roots=roots), self.assertRaises(ValueError):
+                    prepare_datasets(roots=roots, output_dir=output)
+                self.assertFalse(output.exists())
+            with self.assertRaisesRegex(ValueError, "OpenStreetView-5M"):
+                prepare_datasets(manifests=[mapillary / "all.jsonl"], output_dir=output)
 
-    def test_incomplete_gsv_does_not_silently_skip_records(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = gsv_fixture(folder)
-            next((root / "Images" / "North_City").glob("*.JPG")).unlink()
-            with self.assertRaisesRegex(ValueError, "找不到对应图片"):
-                list(iter_gsv_cities(root))
+    def test_gui_rejects_old_source_selections(self):
+        for source in ("GSV-Cities（全球）", "Mapillary / JSONL", "混合数据（全球）"):
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "OpenStreetView-5M"):
+                build_prepare(dict(DEFAULTS, data_source=source))
+        self.assertEqual(len(DATA_SOURCES), 1)
 
-    def test_mixed_sources_keep_place_ids_together_and_rebase_paths(self):
+    def test_training_loader_rejects_non_osv_records_at_any_line(self):
+        from streetgeo.datasets.osv5m import iter_osv5m
+        from test_osv5m import osv_fixture
         with tempfile.TemporaryDirectory() as folder:
-            gsv, mapillary = gsv_fixture(folder), mapillary_fixture(folder)
-            output = Path(folder) / "混合 splits"
-            report = prepare_datasets(roots=[gsv, mapillary], output_dir=output)
-            self.assertEqual(report["source_counts"], {"GSV-Cities": 24, "Mapillary": 6})
-            self.assertEqual(report["samples"], 30)
-            owners = {}
-            for name in ("train", "val", "test"):
-                data = StreetViewDataset(output / f"{name}.jsonl", tiny_config())
-                collated = collate_streetviews([data[0]])
-                self.assertEqual(collated["images"].shape[-2:], (32, 32))
-                for line in (output / f"{name}.jsonl").read_text(encoding="utf-8").splitlines():
-                    row = json.loads(line)
-                    self.assertFalse(Path(row["image"]).is_absolute())
-                    self.assertTrue((output / row["image"]).is_file())
-                    key = row.get("group_id", f"mapillary:{row.get('sequence_id')}")
-                    self.assertEqual(owners.setdefault(key, name), name)
-            self.assertTrue(all(report["counts"].values()))
+            rows = list(iter_osv5m(osv_fixture(folder)))
+            manifest = Path(folder) / "mixed.jsonl"
+            for invalid in (dict(rows[1], source="GSV-Cities"), dict(rows[1], source="Mapillary"),
+                            dict(rows[1], osv5m_id="wrong"), {k:v for k,v in rows[1].items() if k != "source"}):
+                manifest.write_text("\n".join(json.dumps(row) for row in [rows[0], invalid]), encoding="utf-8")
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "OpenStreetView-5M"):
+                    StreetViewDataset(manifest, tiny_config(), osv5m_only=True)
 
-    def test_repeated_preparation_preserves_frozen_manifests_and_rejects_changed_data(self):
+    def test_native_osv_training_resume_and_rejected_legacy_checkpoint(self):
+        from test_osv5m import osv_fixture
+        from streetgeo.core.checkpoints import save_checkpoint
+        from streetgeo.core.model import StreetGeoModel
+        from streetgeo.training.runtime import manifest_fingerprint
         with tempfile.TemporaryDirectory() as folder:
-            root = mapillary_fixture(folder)
-            output = Path(folder) / "prepared"
-            first = prepare_datasets(roots=[root], output_dir=output)
-            stamp = (output / "train.jsonl").stat().st_mtime_ns
-            second = prepare_datasets(roots=[root], output_dir=output, guard_m=250.0)
-            self.assertEqual(first, second)
-            self.assertEqual(stamp, (output / "train.jsonl").stat().st_mtime_ns)
-            manifest = root / "all.jsonl"
-            rows = [json.loads(line) for line in manifest.read_text().splitlines()]
-            rows[0]["latitude"] += .01
-            manifest.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "已有其他"):
-                prepare_datasets(roots=[root], output_dir=output)
-            self.assertEqual(file_digest(output / "train.jsonl"), first["manifest_sha256"]["train.jsonl"])
-
-    def test_cancel_does_not_publish_partial_dataset(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = gsv_fixture(folder)
-            output = Path(folder) / "cancelled"
-            with self.assertRaises(PreparationCancelled):
-                prepare_datasets(roots=[root], output_dir=output, cancelled=lambda: True)
-            self.assertFalse(output.exists())
-
-    def test_gui_builders_support_each_source_without_requiring_the_other(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root, mapillary = gsv_fixture(folder), mapillary_fixture(folder)
-            values = dict(DEFAULTS, gsv_root=str(root), split_output=str(Path(folder) / "out"),
-                          split_manifest=str(mapillary / "all.jsonl"))
-            gsv = build_prepare(dict(values, data_source=DATA_SOURCES[0], split_manifest="missing"), "stop")
-            self.assertIn("--dataset-root", gsv)
-            self.assertNotIn("--manifest", gsv)
-            old = build_prepare(dict(values, data_source=DATA_SOURCES[1], gsv_root="missing"))
-            self.assertIn("--manifest", old)
-            self.assertNotIn("--dataset-root", old)
-            mixed = build_prepare(dict(values, data_source=DATA_SOURCES[2]))
-            self.assertIn("--dataset-root", mixed)
-            self.assertIn("--manifest", mixed)
-
-    def test_native_mixed_directory_training_and_checkpoint_resume(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root, mapillary = gsv_fixture(folder), mapillary_fixture(folder)
-            from test_osv5m import osv_fixture
             osv = osv_fixture(folder)
             folder = Path(folder)
             config = folder / "tiny.json"
-            config.write_text(json.dumps(asdict(tiny_config(dropout=.1))), encoding="utf-8")
+            cfg = tiny_config(dropout=.1)
+            config.write_text(json.dumps(asdict(cfg)), encoding="utf-8")
             output = folder / "world.pt"
-            command = [sys.executable, "-m", "streetgeo", "train", "--dataset-root", str(root), "--dataset-root", str(mapillary), "--dataset-root", str(osv),
+            command = [sys.executable, "-m", "streetgeo", "train", "--dataset-root", str(osv),
                        "--data-output", str(folder / "data"), "--model-config", str(config),
                        "--output", str(output), "--epochs", "3", "--batch-size", "2", "--num-workers", "2",
                        "--device", "cpu", "--amp", "off", "--stop-after-steps", "2"]
@@ -189,27 +112,69 @@ class DatasetSourceTests(unittest.TestCase):
                                       "--num-workers", "2", "--stop-after-steps", "2"], capture_output=True,
                                      text=True, encoding="utf-8", env=environment, timeout=90)
             self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
-            self.assertEqual(read_checkpoint(checkpoint)["training_state"]["global_step"], 4)
+            saved = read_checkpoint(checkpoint)
+            self.assertEqual(saved["training_state"]["global_step"], 4)
+            self.assertEqual(saved["training_state"]["dataset_source"], "OpenStreetView-5M")
+            state = saved["training_state"]
+            rows = [json.loads(line) for line in Path(state["train_manifest"]).read_text(encoding="utf-8").splitlines()]
+            for row in rows:
+                row["image"] = str((Path(state["train_manifest"]).parent / row["image"]).resolve())
+                row["source"] = "Mapillary"
+            legacy_manifest = folder / "old_mapillary.jsonl"
+            legacy_manifest.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            state["train_manifest"] = str(legacy_manifest)
+            state["train_fingerprint"] = manifest_fingerprint(legacy_manifest)
+            state.pop("dataset_source", None)
+            legacy = folder / "old.last.pt"
+            model = StreetGeoModel(cfg)
+            model.load_state_dict(saved["model_state_dict"])
+            save_checkpoint(model, legacy, training_state=state)
+            before = checkpoint.read_bytes()
+            rejected = subprocess.run([sys.executable, "-m", "streetgeo", "train", "--resume", str(legacy), "--device", "cpu"],
+                                      capture_output=True, text=True, encoding="utf-8", env=environment, timeout=90)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("OpenStreetView-5M", rejected.stderr)
+            self.assertEqual(checkpoint.read_bytes(), before)
 
-    def test_gui_source_switch_preserves_resume_controls(self):
+    def test_validation_manifest_cannot_bypass_dataset_policy(self):
+        from streetgeo.datasets.osv5m import iter_osv5m
+        from test_osv5m import osv_fixture
+        with tempfile.TemporaryDirectory() as folder:
+            rows = list(iter_osv5m(osv_fixture(folder)))
+            folder = Path(folder)
+            train = folder / "train.jsonl"
+            validation = folder / "val.jsonl"
+            train.write_text(json.dumps(rows[0]), encoding="utf-8")
+            validation.write_text(json.dumps(dict(rows[1], source="Mapillary")), encoding="utf-8")
+            config = folder / "tiny.json"
+            config.write_text(json.dumps(asdict(tiny_config())), encoding="utf-8")
+            output = folder / "rejected.pt"
+            result = subprocess.run([sys.executable, "-m", "streetgeo", "train", "--train-manifest", str(train),
+                                     "--val-manifest", str(validation), "--model-config", str(config),
+                                     "--device", "cpu", "--output", str(output)], capture_output=True,
+                                    text=True, encoding="utf-8", timeout=60,
+                                    env=dict(os.environ, PYTHONUTF8="1", OMP_NUM_THREADS="2"))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("OpenStreetView-5M", result.stderr)
+            self.assertFalse(output.exists())
+            self.assertFalse(output.with_name("rejected.last.pt").exists())
+
+    def test_gui_has_only_osv_import_and_preserves_resume_controls(self):
         import tkinter as tk
         from streetgeo.ui.training import TrainingApp
-
         with tempfile.TemporaryDirectory() as folder:
             root = tk.Tk()
             root.withdraw()
             app = TrainingApp(root, settings_path=Path(folder) / "gui.json", probe=False)
             try:
-                app.values["data_source"].set(DATA_SOURCES[0])
-                app._source_changed(reset_output=True)
-                self.assertEqual(app.values["split_output"].get(), "data/world_gsv")
-                self.assertEqual(str(app.editors["split_manifest"].cget("state")), "disabled")
+                self.assertEqual(set(app.pages), {"split", "train"})
+                self.assertNotIn("gsv_root", app.editors)
+                self.assertNotIn("split_manifest", app.editors)
                 app.values["mode"].set("继续上次训练")
                 app._lock_controls(True)
                 app._lock_controls(False)
                 self.assertEqual(str(app.editors["epochs"].cget("state")), "disabled")
-                self.assertEqual(str(app.editors["gsv_root"].cget("state")), "normal")
-                self.assertEqual(str(app.editors["split_manifest"].cget("state")), "disabled")
+                self.assertEqual(str(app.editors["osv_root"].cget("state")), "normal")
             finally:
                 app._close()
 

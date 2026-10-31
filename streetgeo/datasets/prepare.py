@@ -1,4 +1,4 @@
-"""Prepare GSV-Cities, partial OSV-5M, Mapillary or joint datasets without copying images."""
+"""Prepare OpenStreetView-5M, including partial downloads, without copying images."""
 
 import argparse
 from collections import Counter
@@ -8,10 +8,9 @@ import os
 from pathlib import Path
 import tempfile
 
-from streetgeo.datasets.sources import (PreparationCancelled, check_cancel, iter_gsv_cities,
-                             iter_manifest, resolve_source)
+from streetgeo.datasets.sources import PreparationCancelled, check_cancel
 from streetgeo.datasets.split import create_splits
-from streetgeo.datasets.osv5m import iter_osv5m
+from streetgeo.datasets.osv5m import iter_osv5m, osv_layout
 
 PREPARATION_VERSION = 2
 OUTPUT_FILES = ("all.jsonl", "train.jsonl", "val.jsonl", "test.jsonl")
@@ -39,15 +38,18 @@ def _relative_row(row, output):
     return row
 
 
-def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_training", seed=1337,
+def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_osv_514m", seed=1337,
                      block_degrees=0.02, guard_m=250, progress=None, cancelled=None):
     """An identical rerun reuses verified frozen files. Changed data needs a new folder."""
     seed, block_degrees, guard_m = int(seed), float(block_degrees), float(guard_m)
-    sources = [resolve_source(path) for path in roots]
-    sources.extend(("jsonl", Path(path).expanduser().resolve()) for path in manifests)
-    sources = list(dict.fromkeys(sources))
+    if manifests:
+        raise ValueError("仅接受 OpenStreetView-5M 原始目录，不接受 GSV-Cities、Mapillary 或自定义 JSONL 导入")
+    sources = list(dict.fromkeys(("osv5m", Path(path).expanduser().resolve()) for path in roots))
     if not sources:
-        raise ValueError("请提供 GSV-Cities / OSV-5M 数据目录或 Mapillary JSONL 清单")
+        raise ValueError("请提供 OpenStreetView-5M 数据目录")
+    for _, path in sources:
+        check_cancel(cancelled)
+        osv_layout(path)
     output = Path(output_dir).expanduser().resolve()
     config = {"preparation_version": PREPARATION_VERSION, "seed": seed,
               "block_degrees": block_degrees, "guard_m": guard_m,
@@ -58,12 +60,7 @@ def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_training"
     for kind, path in sources:
         check_cancel(cancelled)
         detail = {}
-        if kind == "gsv_cities":
-            iterator = iter_gsv_cities(path, report=detail, progress=progress, cancelled=cancelled)
-        elif kind == "osv5m":
-            iterator = iter_osv5m(path, report=detail, progress=progress, cancelled=cancelled)
-        else:
-            iterator = iter_manifest(path, report=detail, cancelled=cancelled)
+        iterator = iter_osv5m(path, report=detail, progress=progress, cancelled=cancelled)
         for row in iterator:
             paths = row.get("images", [row["image"]] if "image" in row else [])
             identity = tuple(os.path.normcase(path) for path in paths)
@@ -153,10 +150,8 @@ def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_training"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-root", action="append", default=[], help="GSV-Cities, OSV-5M or Mapillary directory; repeat to mix")
-    parser.add_argument("--gsv-cities-root", action="append", default=[], help="alias for a GSV-Cities directory")
-    parser.add_argument("--manifest", action="append", default=[], help="existing JSONL; repeat to mix")
-    parser.add_argument("--output-dir", default="data/world_training")
+    parser.add_argument("--dataset-root", action="append", required=True, help="OpenStreetView-5M directory with train.csv and extracted training images")
+    parser.add_argument("--output-dir", default="data/world_osv_514m")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--block-degrees", type=float, default=0.02)
     parser.add_argument("--guard-m", type=float, default=250)
@@ -165,7 +160,7 @@ def main():
     def progress(event):
         print(json.dumps(event, ensure_ascii=False), flush=True)
     try:
-        prepare_datasets(roots=args.dataset_root + args.gsv_cities_root, manifests=args.manifest,
+        prepare_datasets(roots=args.dataset_root,
                          output_dir=args.output_dir, seed=args.seed, block_degrees=args.block_degrees,
                          guard_m=args.guard_m, progress=progress,
                          cancelled=lambda: bool(args.stop_file and Path(args.stop_file).exists()))

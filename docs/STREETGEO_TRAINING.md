@@ -2,6 +2,10 @@
 
 The runtime package is `streetgeo`. From the workspace root, use `.venv\Scripts\python.exe -m streetgeo` or either batch launcher. All application code is in `streetgeo/`; the package rename does not move existing data or checkpoints.
 
+## Accepted training data
+
+Training and preparation accept **OpenStreetView-5M only**. The workbench has an OSV-5M import page and a training page; GSV-Cities, standalone Mapillary, custom JSONL import, and mixed-source controls have been removed. The CLI also rejects unsupported raw directories and checks every row in supplied training/validation manifests. Resuming an old OSV-5M run remains supported when its manifests are unchanged. Resuming other datasets is rejected; their weights remain usable for inference or initialization of a new OSV-5M stage with the same architecture. Do not relabel another dataset as OSV-5M.
+
 ## Default model and a new training run
 
 The model has width 768, 12 attention heads, 15 visual Transformer layers, and 2 view-fusion layers. A single view defaults to 224×224. It has 134,686,730 parameters and approximately 513.8 MiB of FP32 weights. Configuration: `configs/streetgeo_514m.json`.
@@ -31,17 +35,17 @@ Layouts with `train.csv` at the root and images in `images/train/` or the root a
 - The official test directory is excluded. Generated validation/test splits come from the downloaded official training partition.
 - Capture sequences, places, and geographic blocks are kept together. Holdouts are separated from training with a 250-meter proximity buffer.
 
-The prepared local snapshot contains 600,000 images. Its CSV has 4,894,684 records, of which 4,294,684 were skipped because images were not downloaded. Output `data/world_osv_514m/` contains 498,257 training, 50,251 validation, and 50,239 test images, with 1,253 excluded by proximity filtering. Original images and CSV files are not copied, deleted, or modified.
+The previously prepared local snapshot contained 600,000 images. Its CSV has 4,894,684 records, of which 4,294,684 were skipped because images were not downloaded. Output `data/world_osv_514m/` contains 498,257 training, 50,251 validation, and 50,239 test images, with 1,253 excluded by proximity filtering. Original images and CSV files are not copied, deleted, or modified.
 
 ```powershell
 .venv\Scripts\python.exe -m streetgeo prepare --dataset-root data/OpenStreetView-5M --output-dir data/world_osv_514m
 ```
 
-Identical data and parameters reuse verified manifests. After downloading more shards, use a new output directory such as `data/world_osv_514m_v2`. Do not alter manifests for an active run. Repeat `--dataset-root` or `--manifest` to combine sources. Leave unused source paths empty in GUI mixed mode.
+Identical data and parameters reuse verified manifests. After downloading more shards, use a new output directory such as `data/world_osv_514m_v2`. Do not alter manifests for an active run. Repeated `--dataset-root` arguments may combine OSV-5M roots only. General JSONL import and mixed-source training are no longer supported.
 
 ## Starting, saving, and resuming
 
-The GUI already contains the training manifest, validation manifest, and model configuration. Start training there, or use:
+In the GUI, select the OSV-5M root, import it on page 01, and transfer the resulting manifests to page 02 before starting training. Ensure paths match your local files. Alternatively, use:
 
 ```powershell
 .venv\Scripts\python.exe -m streetgeo train --train-manifest data/world_osv_514m/train.jsonl --val-manifest data/world_osv_514m/val.jsonl --model-config configs/streetgeo_514m.json --output checkpoints/streetgeo_514m_osv/best.pt --epochs 4 --batch-size 64 --num-workers 4 --device cuda --amp bf16

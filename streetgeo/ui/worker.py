@@ -21,6 +21,11 @@ def main():
         from streetgeo.core.checkpoints import read_checkpoint
         checkpoint = read_checkpoint(args.path)
         state = checkpoint["training_state"]
+        if state.get("resume_version") == 1:
+            from streetgeo.datasets.policy import check_osv_manifest_header
+            check_osv_manifest_header(state["train_manifest"])
+            if state.get("val_manifest"):
+                check_osv_manifest_header(state["val_manifest"])
         info = {"event": "checkpoint_info", "resumable": state.get("resume_version") == 1,
                 "epoch": state.get("epoch", 0), "step": state.get("global_step", 0),
                 "next_batch": state.get("next_batch", 0), "run_config": state.get("run_config", {}),

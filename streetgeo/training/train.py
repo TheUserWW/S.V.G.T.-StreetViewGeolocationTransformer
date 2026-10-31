@@ -1,4 +1,4 @@
-"""Train on local manifests with atomic checkpoints and batch-level resume."""
+"""Train on OpenStreetView-5M with atomic checkpoints and batch-level resume."""
 
 import argparse
 import json
@@ -100,7 +100,7 @@ def train(args):
     if args.smoke_test:
         smoke_test(device)
         return
-    dataset_roots = list(getattr(args, "dataset_root", []) or []) + list(getattr(args, "gsv_cities_root", []) or [])
+    dataset_roots = list(getattr(args, "dataset_root", []) or [])
     if dataset_roots and (args.resume or args.train_manifest or args.val_manifest):
         raise ValueError("原始数据目录与 --train-manifest/--val-manifest/--resume 分开使用；续训只需指定 --resume")
     if args.resume and args.init_from:
@@ -122,7 +122,7 @@ def train(args):
     if dataset_roots:
         from streetgeo.datasets.sources import PreparationCancelled
         from streetgeo.datasets.prepare import prepare_datasets
-        prepared = Path(getattr(args, "data_output", None) or "data/world_training").resolve()
+        prepared = Path(getattr(args, "data_output", None) or "data/world_osv_514m").resolve()
         try:
             prepare_datasets(roots=dataset_roots, output_dir=prepared, seed=run["seed"],
                              progress=lambda event: print(json.dumps(event, ensure_ascii=False), flush=True),
@@ -151,12 +151,12 @@ def train(args):
         if (checkpoint or args.init_from) and asdict(supplied_config) != asdict(cfg):
             raise ValueError("model-config is incompatible with checkpoint")
         cfg = supplied_config
-    train_data = StreetViewDataset(train_manifest, cfg)
+    train_data = StreetViewDataset(train_manifest, cfg, osv5m_only=True)
     loader_options = {"num_workers": args.num_workers, "collate_fn": collate_streetviews,
                       "pin_memory": device.type == "cuda", "worker_init_fn": ignore_worker_interrupts}
     val_loader = None
     if val_manifest:
-        val_loader = DataLoader(StreetViewDataset(val_manifest, cfg), batch_size=run["batch_size"],
+        val_loader = DataLoader(StreetViewDataset(val_manifest, cfg, osv5m_only=True), batch_size=run["batch_size"],
                                generator=torch.Generator().manual_seed(run["seed"] + 9999), **loader_options)
     print(json.dumps({"event": "training_dataset", "scope": "world", "samples": len(train_data),
                       "sources": train_data.source_counts, "bounds": train_data.geographic_bounds,
@@ -192,7 +192,7 @@ def train(args):
     def save_progress(reason):
         nonlocal last_saved_at
         save_checkpoint(model, last_path, keep_previous=True, training_state={
-            "resume_version": 1, "run_config": run, "amp_mode": amp_mode,
+            "resume_version": 1, "dataset_source": "OpenStreetView-5M", "run_config": run, "amp_mode": amp_mode,
             "epoch": epoch, "next_batch": next_batch, "global_step": step,
             "epoch_loss": epoch_loss, "epoch_examples": epoch_examples, "best_metric": best_metric,
             "optimizer": optimizer.state_dict(), "scaler": scaler.state_dict(), "rng": capture_rng_state(),
@@ -289,11 +289,10 @@ def train(args):
 def main():
     defaults = TrainConfig()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-root", action="append", default=[], help="GSV-Cities, partial OSV-5M or Mapillary directory; repeat to mix")
-    parser.add_argument("--gsv-cities-root", action="append", default=[], help="alias for a GSV-Cities directory")
-    parser.add_argument("--data-output", help="frozen generated manifests directory; default data/world_training")
-    parser.add_argument("--train-manifest")
-    parser.add_argument("--val-manifest")
+    parser.add_argument("--dataset-root", action="append", default=[], help="OpenStreetView-5M directory; partial image downloads supported")
+    parser.add_argument("--data-output", help="frozen generated manifests directory; default data/world_osv_514m")
+    parser.add_argument("--train-manifest", help="prepared OpenStreetView-5M training JSONL")
+    parser.add_argument("--val-manifest", help="prepared OpenStreetView-5M validation JSONL")
     parser.add_argument("--model-config")
     parser.add_argument("--resume", help="full *.last.pt checkpoint; continue the same run")
     parser.add_argument("--init-from", help="model weights for a NEW training stage")

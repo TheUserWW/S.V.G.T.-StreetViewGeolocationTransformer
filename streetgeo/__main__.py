@@ -7,10 +7,10 @@ import sys
 COMMANDS = {
     "gui": ("streetgeo.ui.training", "Open the training workbench"),
     "map": ("streetgeo.ui.prediction", "Open the local prediction map"),
-    "train": ("streetgeo.training.train", "Train or resume a model"),
+    "train": ("streetgeo.training.train", "Train or resume an OpenStreetView-5M model"),
     "predict": ("streetgeo.inference.predict", "Predict coordinates from local images"),
     "download": ("streetgeo.datasets.download_mapillary", "Download Mapillary street views"),
-    "prepare": ("streetgeo.datasets.prepare", "Import and split datasets"),
+    "prepare": ("streetgeo.datasets.prepare", "Import and split OpenStreetView-5M"),
     "split": ("streetgeo.datasets.split", "Split an existing JSONL manifest"),
     "check-gpu": ("streetgeo.cli.check_gpu", "Check CUDA training capacity"),
     "refresh-map": ("streetgeo.maps.refresh", "Refresh offline UN reference geography"),

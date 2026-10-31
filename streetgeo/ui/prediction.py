@@ -5,7 +5,6 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import queue
@@ -15,7 +14,9 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
-from streetgeo.ui.common import ACCENT, BG, BORDER, FONT, MUTED, NAV, PANEL, TEXT, ScrollFrame, button, label
+from streetgeo.ui.common import (ACCENT, BG, BORDER, FONT, INPUT, MUTED, NAV, PANEL,
+                                 SELECTION, SURFACE, TEXT, WARNING, ScrollFrame,
+                                 apply_dark_theme, button, label)
 from streetgeo.maps.projection import ControlPoint, ScreenshotCalibration, parse_coordinates
 from streetgeo.maps.widgets import ScreenshotCanvas, WorldMap
 from streetgeo.inference.backend import InferenceEngine, ROOT, read_picture
@@ -57,22 +58,17 @@ class PredictionApp:
         self.events = queue.Queue()
         self.engine = InferenceEngine()
         self.input_widgets = []
+        self._poll_id, self._balance_id = None, None
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.root.after(100, self._poll)
+        self._poll_id = self.root.after(100, self._poll)
 
     def _build(self):
         root = self.root
         root.title("StreetGeo · 本地预测地图")
-        root.configure(bg=BG)
+        apply_dark_theme(root)
         root.geometry(f"{min(1560, int(root.winfo_screenwidth() * .92))}x{min(1000, int(root.winfo_screenheight() * .90))}")
         root.minsize(1160, 760)
-        style = ttk.Style(root)
-        style.theme_use("clam")
-        style.configure("TCombobox", padding=5, fieldbackground=PANEL, font=(FONT, 9))
-        style.configure("Treeview", font=(FONT, 9), rowheight=26)
-        style.configure("Treeview.Heading", font=(FONT, 9))
-        style.configure("TCheckbutton", background=PANEL, font=(FONT, 9), foreground=TEXT)
         header = tk.Frame(root, bg=NAV)
         header.pack(fill="x")
         label(header, "STREETGEO  /  本地预测地图", size=17, color="white", bold=True).pack(side="left", padx=24, pady=20)
@@ -104,13 +100,13 @@ class PredictionApp:
         self.input_widgets.append(button(actions, "清空", self.clear_images, padx=12, pady=7))
         self.input_widgets[-1].pack(side="left", padx=8)
         row += 1
-        self.preview = tk.Label(fields, text="尚未导入街景", bg="#eef3f5", fg=MUTED, font=(FONT, 10), width=29, height=8)
+        self.preview = tk.Label(fields, text="尚未导入街景", bg=SURFACE, fg=MUTED, font=(FONT, 10), width=29, height=8)
         self.preview.grid(row=row, column=0, sticky="ew", pady=(10, 6))
         row += 1
         self.image_names = label(fields, "", size=8, color=MUTED, wraplength=295)
         self.image_names.grid(row=row, column=0, sticky="w")
         row += 1
-        heading("02  选择模型")
+        heading("02  选择模型", "预测范围固定为全球，地图缩放仅影响显示。")
         entry = ttk.Entry(fields, textvariable=self.checkpoint, font=(FONT, 9))
         entry.grid(row=row, column=0, sticky="ew")
         self.input_widgets.append(entry)
@@ -131,9 +127,10 @@ class PredictionApp:
         self.inference_info.grid(row=row, column=0, sticky="w", pady=(7, 0))
         row += 1
         heading("03  预测结果", "点击候选可切换地图与截图提示。")
-        self.candidate_list = tk.Listbox(fields, height=5, font=("Consolas", 10), bg="#f6f9fa", fg=TEXT,
+        self.candidate_list = tk.Listbox(fields, height=5, font=("Consolas", 10), bg=INPUT, fg=TEXT,
                                         bd=0, highlightthickness=1, highlightbackground=BORDER,
-                                        selectbackground=ACCENT, selectforeground="white", exportselection=False)
+                                        selectbackground=SELECTION, selectforeground=TEXT, highlightcolor=ACCENT,
+                                        exportselection=False)
         self.candidate_list.grid(row=row, column=0, sticky="ew")
         self.candidate_list.bind("<<ListboxSelect>>", self.select_candidate)
         row += 1
@@ -166,9 +163,9 @@ class PredictionApp:
         self.panes.add(self.map_panel, minsize=330, stretch="always")
         tools = tk.Frame(self.map_panel, bg=PANEL)
         tools.pack(fill="x", padx=8, pady=7)
-        for title, command in (("世界", self.world_view), ("美国", self.us_view), ("定位候选", self.focus_candidate)):
+        for title, command in (("全球总览", self.world_view), ("定位候选", self.focus_candidate)):
             button(tools, title, command, padx=8, pady=5).pack(side="left", padx=2)
-        self.zoom_label = label(tools, "z3", size=8, color=MUTED)
+        self.zoom_label = label(tools, "z0", size=8, color=MUTED)
         self.zoom_label.pack(side="right", padx=4)
         layer = tk.Frame(self.map_panel, bg=PANEL)
         layer.pack(fill="x", padx=10, pady=(0, 6))
@@ -228,7 +225,7 @@ class PredictionApp:
                 image = read_picture(path)
                 image.thumbnail((288, 160) if len(paths) == 1 else (141, 79))
                 thumbnails.append(image)
-            canvas = Image.new("RGB", (294, 166), "#eef3f5")
+            canvas = Image.new("RGB", (294, 166), SURFACE)
             for index, image in enumerate(thumbnails):
                 if len(paths) == 1:
                     x, y = (294 - image.width) // 2, (166 - image.height) // 2
@@ -289,6 +286,7 @@ class PredictionApp:
         threading.Thread(target=worker, daemon=True, name="streetview-prediction").start()
 
     def _poll(self):
+        self._poll_id = None
         for _ in range(30):
             try:
                 kind, data = self.events.get_nowait()
@@ -300,17 +298,16 @@ class PredictionApp:
                 self._busy(False)
                 self.show_result(data)
                 self.inference_info.configure(text=f"{data['device']} · {data['elapsed_seconds']:.2f} 秒 · " + ("复用已加载模型" if data["reused_model"] else "已加载 checkpoint"))
-                self.status.set("预测完成 · 可选择候选并对照地图落点")
+                self.status.set("全球预测完成 · 可选择候选并对照地图落点")
             elif kind == "error":
                 self._busy(False)
                 self.status.set("预测失败 · 请检查 checkpoint、图片与设备")
                 if not self.closing:
                     self.error(data)
         if self.closing and not self.busy:
-            self.map.close()
-            self.root.destroy()
+            self._destroy()
             return
-        self.root.after(100, self._poll)
+        self._poll_id = self.root.after(100, self._poll)
 
     def clear_result(self):
         self.result, self.candidates, self.selected = None, [], 0
@@ -330,6 +327,7 @@ class PredictionApp:
         self.candidate_list.selection_set(0)
         self.map.candidates = self.candidates
         self.select_candidate()
+        self.world_view()
 
     def select_candidate(self, event=None):
         selection = self.candidate_list.curselection()
@@ -338,7 +336,7 @@ class PredictionApp:
         self.selected = selection[0]
         candidate = self.candidates[self.selected]
         self.map.selected = self.selected
-        self.focus_candidate()
+        self.map.redraw()
         probability = candidate.get("cell_probability")
         self.probability_label.configure(text="手动坐标 · 未经过模型预测" if probability is None else f"网格概率 {probability:.2%} · 非校准正确率")
         self.update_target()
@@ -356,10 +354,7 @@ class PredictionApp:
             self.error(error)
 
     def world_view(self):
-        self.map.focus(15, 0, max(0, min(2, int(math.log2(max(256, self.map.winfo_width()) / 256)))))
-
-    def us_view(self):
-        self.map.focus(38, -98, 3)
+        self.map.show_world()
 
     def focus_candidate(self):
         if self.candidates:
@@ -405,9 +400,12 @@ class PredictionApp:
             self.panes.add(self.screen_panel, minsize=310, stretch="always")
             self.calibration_panel.pack(fill="x", pady=(10, 0))
             self.calibration_toggle.configure(text="收起截图")
-            self.root.after(100, self.balance_panes)
+            if self._balance_id is not None:
+                self.root.after_cancel(self._balance_id)
+            self._balance_id = self.root.after(100, self.balance_panes)
 
     def balance_panes(self):
+        self._balance_id = None
         if self.screenshot_visible():
             self.panes.update_idletasks()
             self.panes.sash_place(0, self.panes.winfo_width() // 2, 0)
@@ -472,7 +470,7 @@ class PredictionApp:
             self.cancel_point()
             self.refresh_calibration()
         elif self.adding:
-            self.calibration_hint.configure(text="请先在本地地图选择对应地点，再点击截图。", fg="#aa701b")
+            self.calibration_hint.configure(text="请先在本地地图选择对应地点，再点击截图。", fg=WARNING)
 
     def delete_point(self):
         selection = self.point_table.selection()
@@ -500,9 +498,9 @@ class PredictionApp:
                 self.fit = ScreenshotCalibration(self.points)
                 note = "仅 3 点不能独立检验精度，建议再加对应点。" if len(self.points) == 3 else "请检查十字位置，误差较大时调整对应点。"
                 self.calibration_hint.configure(text=f"拟合误差 RMS {self.fit.rms_pixels:.1f} 原图像素 · {note} 地图缩放或移动后须重新截图校准。",
-                                                fg=ACCENT if self.fit.rms_pixels < 8 else "#aa701b")
+                                                fg=ACCENT if self.fit.rms_pixels < 8 else WARNING)
             except ValueError as error:
-                self.calibration_hint.configure(text=str(error), fg="#aa701b")
+                self.calibration_hint.configure(text=str(error), fg=WARNING)
         self.map.redraw()
         self.update_target()
 
@@ -597,8 +595,15 @@ class PredictionApp:
             self.closing = True
             self.status.set("正在等待当前推理完成后退出…")
         else:
-            self.map.close()
-            self.root.destroy()
+            self._destroy()
+
+    def _destroy(self):
+        for callback in (self._poll_id, self._balance_id):
+            if callback is not None:
+                self.root.after_cancel(callback)
+        self._poll_id = self._balance_id = None
+        self.map.close()
+        self.root.destroy()
 
 
 def main():
