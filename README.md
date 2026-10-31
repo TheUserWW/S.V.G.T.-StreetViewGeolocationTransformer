@@ -1,4 +1,4 @@
-# StreetGeo: Street-View Geolocation Transformer
+# Street-View Geolocation Transformer
 
 StreetGeo converts local street-view images into geographic locations. It outputs decimal coordinates accepted by Google Maps: `latitude, longitude`, for example `34.052200, -118.243700`. This example illustrates the format only.
 
