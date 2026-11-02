@@ -1,4 +1,5 @@
 @echo off
+title S.V.G.T. - Training
 cd /d "%~dp0"
 if not exist ".venv\Scripts\pythonw.exe" (
     echo Project Python environment was not found. See README.md for setup.

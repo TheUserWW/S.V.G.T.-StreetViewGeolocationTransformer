@@ -153,7 +153,7 @@ class ModelTests(unittest.TestCase):
     def test_default_architecture_four_views(self):
         model = StreetGeoModel().eval()
         weight_mib = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024 ** 2
-        self.assertTrue(500 < weight_mib < 530)
+        self.assertTrue(1500 < weight_mib < 1530)
         with torch.no_grad():
             output = model(torch.randn(1, 4, 3, 224, 224), top_k=5)
         self.assertEqual(output.fine_logits.shape, (1, 648, 16))

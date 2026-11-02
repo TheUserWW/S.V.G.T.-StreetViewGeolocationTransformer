@@ -7,9 +7,9 @@ from dataclasses import dataclass
 class ModelConfig:
     image_size: int = 224
     patch_size: int = 16
-    n_embed: int = 768
-    n_head: int = 12
-    n_layer: int = 15
+    n_embed: int = 1024
+    n_head: int = 16
+    n_layer: int = 28
     fusion_layers: int = 2
     view_queries: int = 4
     max_views: int = 4
@@ -56,7 +56,7 @@ class ModelConfig:
 
 @dataclass
 class TrainConfig:
-    batch_size: int = 64
+    batch_size: int = 32
     epochs: int = 4
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
@@ -65,7 +65,7 @@ class TrainConfig:
     num_workers: int = 4
     device: str = "auto"
     seed: int = 1337
-    model_path: str = "checkpoints/streetgeo_514m/best.pt"
+    model_path: str = "checkpoints/streetgeo_400m_osv/best.pt"
     save_every_steps: int = 500
     save_every_seconds: float = 300.0
     log_every_steps: int = 10

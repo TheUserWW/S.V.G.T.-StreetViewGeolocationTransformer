@@ -79,7 +79,7 @@ class MapillaryClient:
             raise DownloadError("Only HTTPS downloads are supported")
         if authenticated and parts.netloc != "graph.mapillary.com":
             raise DownloadError("Refusing to send credentials outside Mapillary Graph API")
-        headers = {"User-Agent": "StreetGeo-Training/1.0"}
+        headers = {"User-Agent": "SVGT-Training/1.0"}
         if authenticated:
             headers["Authorization"] = "OAuth " + self.token
         for attempt in range(self.retries + 1):

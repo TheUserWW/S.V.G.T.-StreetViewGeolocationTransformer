@@ -9,6 +9,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from streetgeo.core import EmptyPredictionDomainError
 from streetgeo.core.config import ModelConfig
 from streetgeo.core.geography import HierarchicalGeoGrid, LocationPrediction, coordinates_to_unit_vectors
 
@@ -173,18 +174,60 @@ class StreetGeoModel(nn.Module):
         visual = embedding.unsqueeze(1).expand(-1, cell_ids.shape[1], -1)
         return self.offset_head(torch.cat((visual, self.cell_embedding(cell_ids)), dim=-1))
 
-    def forward(self, images, targets=None, *, view_mask=None, headings=None, top_k=5):
+    def _rank_candidates(self, embedding, log_probs, top_k, coordinate_filter=None):
+        if coordinate_filter is None:
+            values, cell_ids = log_probs.topk(top_k, dim=-1)
+            coordinates = self.grid.decode(cell_ids, self._offsets(embedding, cell_ids))
+            return values, cell_ids, coordinates
+        # Scan in probability order with bounded offset-head memory. Filtering the
+        # original top five alone could miss every valid lower-ranked candidate.
+        order = log_probs.argsort(dim=-1, descending=True, stable=True)
+        selected_ids, selected_coordinates = [], []
+        for sample in range(embedding.shape[0]):
+            kept_ids, kept_coordinates = [], []
+            count = 0
+            for start in range(0, order.shape[1], 256):
+                ids = order[sample:sample + 1, start:start + 256]
+                coordinates = self.grid.decode(ids, self._offsets(embedding[sample:sample + 1], ids))
+                mask = torch.as_tensor(coordinate_filter(coordinates[0].detach().cpu().numpy()),
+                                       dtype=torch.bool, device=ids.device)
+                if mask.shape != ids[0].shape:
+                    raise ValueError("coordinate filter must return one boolean per coordinate")
+                kept_ids.append(ids[0, mask])
+                kept_coordinates.append(coordinates[0, mask])
+                count += int(mask.sum())
+                if count >= top_k:
+                    break
+            if not count:
+                raise EmptyPredictionDomainError("No predicted coordinates fall inside the selected coverage domain")
+            selected_ids.append(torch.cat(kept_ids)[:top_k])
+            selected_coordinates.append(torch.cat(kept_coordinates)[:top_k])
+        # Tiny/custom grids can have fewer than top_k eligible locations.
+        size = min(len(ids) for ids in selected_ids)
+        ids = torch.stack([ids[:size] for ids in selected_ids])
+        coordinates = torch.stack([coords[:size] for coords in selected_coordinates])
+        return log_probs.gather(1, ids), ids, coordinates
+
+    def forward(self, images, targets=None, *, view_mask=None, headings=None, top_k=5,
+                coordinate_filter=None):
         if type(top_k) is not int or not 1 <= top_k <= self.config.total_cells:
             raise ValueError(f"top_k must be an integer in [1, {self.config.total_cells}]")
         embedding = self.encoder(images, view_mask, headings)
+        return self.forward_embedding(embedding, targets, top_k=top_k, coordinate_filter=coordinate_filter)
+
+    def forward_embedding(self, embedding, targets=None, *, top_k=5, coordinate_filter=None):
+        """Run the geographic heads on features from this model's frozen encoder."""
+        if type(top_k) is not int or not 1 <= top_k <= self.config.total_cells:
+            raise ValueError(f"top_k must be an integer in [1, {self.config.total_cells}]")
+        if embedding.ndim != 2 or embedding.shape[1] != self.config.n_embed:
+            raise ValueError("embedding must have shape [batch, n_embed]")
         batch = embedding.shape[0]
         coarse = self.coarse_head(embedding)
         fine = self.fine_head(embedding).reshape(batch, self.config.coarse_cells, -1)
         # Exact joint probabilities over all leaves, without pruning coarse cells.
         log_probs = F.log_softmax(coarse.float(), -1).unsqueeze(-1)
         log_probs = (log_probs + F.log_softmax(fine.float(), -1)).flatten(1)
-        values, cell_ids = log_probs.topk(top_k, dim=-1)
-        coordinates = self.grid.decode(cell_ids, self._offsets(embedding, cell_ids))
+        values, cell_ids, coordinates = self._rank_candidates(embedding, log_probs, top_k, coordinate_filter)
         losses = {}
         loss = None
         if targets is not None:
@@ -210,12 +253,13 @@ class StreetGeoModel(nn.Module):
                                  coarse, fine, F.normalize(embedding, dim=-1), loss, losses)
 
     @torch.inference_mode()
-    def predict(self, images, *, view_mask=None, headings=None, top_k=5):
+    def predict(self, images, *, view_mask=None, headings=None, top_k=5, coordinate_filter=None):
         """One ranked list per sample. Restores the caller's train/eval state."""
         was_training = self.training
         self.eval()
         try:
-            output = self(images, view_mask=view_mask, headings=headings, top_k=top_k)
+            output = self(images, view_mask=view_mask, headings=headings, top_k=top_k,
+                          coordinate_filter=coordinate_filter)
             coords = output.candidate_coordinates.cpu().tolist()
             probs = output.candidate_probabilities.cpu().tolist()
             ids = output.candidate_cell_ids.cpu().tolist()

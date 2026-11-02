@@ -2,6 +2,7 @@ from dataclasses import asdict
 import io
 import json
 from pathlib import Path
+import os
 import queue
 import tempfile
 import time
@@ -12,14 +13,95 @@ from PIL import Image
 
 from streetgeo.core.checkpoints import read_checkpoint
 from streetgeo.datasets.download_mapillary import collect
-from streetgeo.ui.backend import (DEFAULTS, ProcessRunner, build_prepare, build_training,
-                         load_settings, save_settings)
+from streetgeo.ui.backend import (DEFAULTS, MODEL_PRESETS, ProcessRunner, build_prepare, build_gpu_check, build_training,
+                         load_settings, model_preset_for_config, new_model_output, save_settings)
+from unittest.mock import patch
 from test_model import tiny_config
 from test_mapillary import FakeBoundary, FakeClient, args_for
 from streetgeo.training.runtime import StopRequest
 
 
 class GuiBackendTests(unittest.TestCase):
+    def test_gpu_check_uses_selected_model_and_batch_size(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "selected model.json"
+            config.write_text("{}", encoding="utf-8")
+            values = dict(DEFAULTS, model_config=str(config), batch_size="8")
+            self.assertEqual(build_gpu_check(values), ["--batch-size", "8", "--amp", "bf16", "--model-config", str(config)])
+            values["batch_size"] = "0"
+            with self.assertRaises(ValueError):
+                build_gpu_check(values)
+
+    def test_previous_settings_infer_model_size_from_config(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            for name, preset in MODEL_PRESETS.items():
+                path.write_text(json.dumps({"model_config": preset["config"]}), encoding="utf-8")
+                self.assertEqual(load_settings(path)["model_preset"], name)
+
+    def test_model_output_avoids_existing_weights_and_resume_state(self):
+        with tempfile.TemporaryDirectory() as folder, patch("streetgeo.ui.backend.ROOT", Path(folder)):
+            for name, preset in MODEL_PRESETS.items():
+                path = new_model_output(preset["config"])
+                self.assertEqual(path.parent.name, preset["directory"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.with_name("best.last.pt").touch()
+                self.assertEqual(new_model_output(preset["config"]).name, "best_2.pt")
+
+    @unittest.skipUnless(os.name == "nt", "Windows naming rules")
+    def test_invalid_output_rejected_before_manifest_checks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            values = dict(DEFAULTS, output=str(Path(folder) / "SVGT:4B.pt"), train_manifest="missing")
+            with patch("streetgeo.datasets.policy.check_osv_manifest_header") as checked:
+                with self.assertRaisesRegex(ValueError, "Windows"):
+                    build_training(values, Path(folder) / "stop")
+                checked.assert_not_called()
+
+    def test_gui_switches_scales_without_changing_resume_architecture(self):
+        import tkinter as tk
+        from streetgeo.ui.training import TrainingApp
+        with tempfile.TemporaryDirectory() as folder:
+            root = tk.Tk()
+            root.withdraw()
+            app = TrainingApp(root, settings_path=Path(folder) / "settings.json", probe=False)
+            try:
+                for name, preset in MODEL_PRESETS.items():
+                    app.values["init_from"].set("previous.pt")
+                    app.values["model_preset"].set(name)
+                    app._model_preset_changed()
+                    self.assertEqual(app.values["model_config"].get(), preset["config"])
+                    self.assertEqual(app.values["batch_size"].get(), preset["batch_size"])
+                    self.assertEqual(model_preset_for_config(app.values["model_config"].get()), name)
+                    self.assertEqual(Path(app.values["output"].get()).parent.name, preset["directory"])
+                    self.assertEqual(app.values["init_from"].get(), "")
+                app.values["mode"].set("继续上次训练")
+                app._mode_changed()
+                self.assertEqual(str(app.editors["model_preset"].cget("state")), "disabled")
+                original_name, original = next(iter(MODEL_PRESETS.items()))
+                original_config = json.loads((Path(__file__).resolve().parents[1] / original["config"]).read_text())
+                app._structured({"event": "checkpoint_info", "resumable": True,
+                                 "model_config": original_config, "run_config": {"batch_size": 128},
+                                 "step": 9, "epoch": 0, "next_batch": 9})
+                self.assertEqual(app.values["model_preset"].get(), original_name)
+                self.assertEqual(app.values["model_config"].get(), original["config"])
+                self.assertEqual(app.values["batch_size"].get(), "128")
+                app._structured({"event": "validation_progress", "epoch": 2, "batch": 5,
+                                 "total_batches": 10, "samples": 320, "total_samples": 640})
+                self.assertIn("验证中", app.task_label.cget("text"))
+                self.assertEqual(float(app.progress.cget("value")), 50)
+                app._structured({"event": "training_phase", "phase": "saving"})
+                self.assertIn("保存", app.task_label.cget("text"))
+                app.progress.stop()
+                app.values["mode"].set("新建训练")
+                app._mode_changed()
+                self.assertEqual(str(app.editors["model_preset"].cget("state")), "readonly")
+                app.values["model_config"].set(str(Path(folder) / "custom.json"))
+                self.assertNotIn(app.values["model_preset"].get(), MODEL_PRESETS)
+            finally:
+                for timer in root.tk.call("after", "info"):
+                    root.after_cancel(timer)
+                app._close()
+
     def test_preferences_never_store_access_token(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"

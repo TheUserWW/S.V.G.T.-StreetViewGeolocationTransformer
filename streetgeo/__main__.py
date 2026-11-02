@@ -2,11 +2,13 @@
 import argparse
 import importlib
 import sys
+from streetgeo import PROJECT_TITLE
 
 
 COMMANDS = {
     "gui": ("streetgeo.ui.training", "Open the training workbench"),
     "map": ("streetgeo.ui.prediction", "Open the local prediction map"),
+    "workspace": ("streetgeo.client.workbench", "Open the daily prediction and correction workspace"),
     "train": ("streetgeo.training.train", "Train or resume an OpenStreetView-5M model"),
     "predict": ("streetgeo.inference.predict", "Predict coordinates from local images"),
     "download": ("streetgeo.datasets.download_mapillary", "Download Mapillary street views"),
@@ -22,7 +24,7 @@ COMMANDS = {
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
-        prog="streetgeo", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        prog="streetgeo", description=f"{PROJECT_TITLE}\n\n{__doc__}", formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Commands:\n" + "\n".join(f"  {name:13} {description}" for name, (_, description) in COMMANDS.items())
         + "\n\nUse: python -m streetgeo <command> --help",
     )

@@ -15,9 +15,44 @@ from streetgeo.core.checkpoints import capture_rng_state, read_checkpoint, resto
 from streetgeo.core.model import StreetGeoModel
 from test_model import tiny_config
 from streetgeo.training.runtime import EpochBatchSampler, StopRequest
+from streetgeo.training.train import evaluate
+from torch.utils.data import DataLoader
 
 
 class ResumeTests(unittest.TestCase):
+    def test_validation_reports_progress_and_restores_training_mode(self):
+        model = StreetGeoModel(tiny_config()).train()
+        loader = DataLoader([{"images": torch.randn(3, 32, 32),
+                              "targets": torch.tensor([30., -100.])} for _ in range(5)], batch_size=2)
+        events = []
+        metrics = evaluate(model, loader, torch.device("cpu"), progress=events.append)
+        self.assertTrue(model.training)
+        self.assertEqual(events[0]["batch"], 0)
+        self.assertEqual(events[-1]["batch"], 3)
+        self.assertEqual(events[-1]["samples"], 5)
+        self.assertIn("median_km", metrics)
+
+    @unittest.skipUnless(os.name == "nt", "Windows naming rules")
+    def test_invalid_checkpoint_names_cannot_create_files_or_streams(self):
+        with tempfile.TemporaryDirectory() as folder:
+            parent = Path(folder) / "not_created"
+            for name in ('SVGT:4B.pt', 'bad?.pt', 'NUL.pt', 'bad.pt.'):
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    save_checkpoint(object(), parent / name)
+                self.assertFalse(parent.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows naming rules")
+    def test_cli_rejects_invalid_output_before_loading_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = subprocess.run([sys.executable, "-m", "streetgeo", "train", "--device", "cpu",
+                                     "--train-manifest", str(Path(folder) / "missing.jsonl"),
+                                     "--output", str(Path(folder) / "SVGT:4B.pt")],
+                                    capture_output=True, text=True, encoding="utf-8",
+                                    env=dict(os.environ, PYTHONUTF8="1"), timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Windows", result.stderr)
+            self.assertNotIn("FileNotFoundError", result.stderr)
+
     def test_sampler_resumes_without_replaying_completed_indices(self):
         full = list(EpochBatchSampler(11, 3, 1337, 2))
         resumed = list(EpochBatchSampler(11, 3, 1337, 2, start_batch=2))
@@ -122,6 +157,20 @@ class ResumeTests(unittest.TestCase):
                 torch.testing.assert_close(tensor, actual["model_state_dict"][name], atol=0, rtol=0)
             expected_state, actual_state = expected["training_state"], actual["training_state"]
             self.assertEqual(actual_state["global_step"], 6)
+            # A stop after the final training batch still requires final validation.
+            terminal = folder / "terminal" / "best.pt"
+            run([*common, "--output", str(terminal), "--stop-after-steps", "6"])
+            terminal_last = terminal.with_name("best.last.pt")
+            pending = read_checkpoint(terminal_last)["training_state"]
+            self.assertEqual(pending["next_batch"], 3)
+            finished = run(["--resume", str(terminal_last), "--device", "cpu"])
+            terminal_state = read_checkpoint(terminal_last)
+            self.assertEqual(terminal_state["training_state"]["global_step"], 6)
+            self.assertEqual(terminal_state["training_state"]["epoch"], 2)
+            self.assertIn('"event": "validation_progress"', finished.stdout)
+            self.assertIn("Training complete.", finished.stdout)
+            for name, tensor in expected["model_state_dict"].items():
+                torch.testing.assert_close(tensor, terminal_state["model_state_dict"][name], atol=0, rtol=0)
             self.assertEqual(expected_state["lr_schedule"], actual_state["lr_schedule"])
             torch.testing.assert_close(expected_state["rng"]["torch"], actual_state["rng"]["torch"])
             for identifier, values in expected_state["optimizer"]["state"].items():

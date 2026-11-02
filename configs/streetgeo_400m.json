@@ -1,0 +1,18 @@
+{
+  "image_size": 224,
+  "patch_size": 16,
+  "n_embed": 1024,
+  "n_head": 16,
+  "n_layer": 28,
+  "fusion_layers": 2,
+  "view_queries": 4,
+  "max_views": 4,
+  "mlp_ratio": 4,
+  "dropout": 0.1,
+  "coarse_lat_bins": 18,
+  "coarse_lon_bins": 36,
+  "fine_bins": 4,
+  "cell_embed_dim": 128,
+  "offset_loss_weight": 1.0,
+  "spherical_loss_weight": 1.0
+}

@@ -29,7 +29,8 @@ class InferenceEngine:
         self.model = None
         self.key = None
 
-    def predict(self, checkpoint, images, *, device="auto", top_k=5, progress=lambda text: None):
+    def predict(self, checkpoint, images, *, device="auto", top_k=5, google_coverage_only=False,
+                progress=lambda text: None):
         path = Path(checkpoint).expanduser()
         path = (ROOT / path).resolve() if not path.is_absolute() else path.resolve()
         if not path.is_file():
@@ -56,12 +57,16 @@ class InferenceEngine:
             self.key = key
         if not 1 <= len(images) <= self.model.config.max_views:
             raise ValueError(f"此模型支持同一地点的 1～{self.model.config.max_views} 张图片")
-        progress("正在全球范围内分析街景…")
-        results = predict_images(self.model, images, top_k=min(int(top_k), self.model.config.total_cells))
+        progress("正在官方街景覆盖国家／地区内分析…" if google_coverage_only else "正在全球范围内分析街景…")
+        options = {"google_coverage_only": True} if google_coverage_only else {}
+        results = predict_images(self.model, images, top_k=min(int(top_k), self.model.config.total_cells), **options)
+        from streetgeo.inference.coverage import coverage_details
         if next(self.model.parameters()).is_cuda:
             torch.cuda.synchronize()
         return {
-            "source": "model", "prediction_scope": "world",
+            "source": "model", "prediction_scope": "google_streetview_regions" if google_coverage_only else "world",
+            "google_coverage_only": bool(google_coverage_only),
+            "coverage": coverage_details() if google_coverage_only else None,
             "checkpoint": str(path), "checkpoint_mtime_ns": stamp.st_mtime_ns,
             "images": [str(Path(image).resolve()) for image in images],
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -106,7 +111,7 @@ class TileCache:
         except (OSError, ValueError, KeyError, TypeError):
             pass
         request = Request(f"https://tile.openstreetmap.org/{zoom}/{x}/{y}.png",
-                          headers={"User-Agent": "StreetGeoLocalMap/1.0 (desktop; interactive map)"})
+                          headers={"User-Agent": "SVGTLocalMap/1.0 (desktop; interactive map)"})
         with self.opener(request, timeout=7) as response:
             content = response.read(2 * 1024 * 1024 + 1)
             headers = response.headers

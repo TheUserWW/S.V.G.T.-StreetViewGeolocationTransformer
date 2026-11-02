@@ -27,6 +27,7 @@ def main():
             if state.get("val_manifest"):
                 check_osv_manifest_header(state["val_manifest"])
         info = {"event": "checkpoint_info", "resumable": state.get("resume_version") == 1,
+                "model_config": checkpoint["model_config"],
                 "epoch": state.get("epoch", 0), "step": state.get("global_step", 0),
                 "next_batch": state.get("next_batch", 0), "run_config": state.get("run_config", {}),
                 "output": state.get("output_path"), "train_manifest": state.get("train_manifest"),

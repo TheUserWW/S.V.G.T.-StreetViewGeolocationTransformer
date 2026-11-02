@@ -11,6 +11,7 @@ import torch
 
 from streetgeo.core.config import ModelConfig
 from streetgeo.core.model import StreetGeoModel
+from streetgeo.paths import validate_checkpoint_path
 
 ARCHITECTURE = "streetview_hierarchical_vit_v1"
 
@@ -26,7 +27,7 @@ def resolve_device(name="auto"):
 
 def save_checkpoint(model, path, *, training_state=None, keep_previous=False):
     """Commit by atomic rename; a failed write leaves the old file usable."""
-    path = Path(path)
+    path = validate_checkpoint_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
@@ -66,7 +67,7 @@ def restore_rng_state(state):
 def read_checkpoint(path):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, dict) or checkpoint.get("architecture") != ARCHITECTURE:
-        raise ValueError("Expected a StreetGeo visual checkpoint; old text GPT weights are incompatible")
+        raise ValueError("Expected an S.V.G.T. visual checkpoint; old text GPT weights are incompatible")
     return checkpoint
 
 

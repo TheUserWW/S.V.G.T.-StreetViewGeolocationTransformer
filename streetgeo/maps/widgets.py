@@ -18,9 +18,10 @@ from streetgeo.ui.common import (FONT, INPUT, MAP_BORDER, MAP_DASH, MAP_LABEL,
 
 
 class WorldMap(tk.Canvas):
-    def __init__(self, parent, *, on_click=None, on_move=None, on_view=None, cache_folder=None):
+    def __init__(self, parent, *, on_click=None, on_move=None, on_view=None, cache_folder=None, translate=None):
         super().__init__(parent, bg=MAP_OCEAN, highlightthickness=0, cursor="fleur")
         self.on_click, self.on_move, self.on_view = on_click, on_move, on_view
+        self.translate = translate if translate is not None else lambda source: source
         self.zoom, self.center = 0, project(0, 0)
         self._world_overview = True
         self.online = False
@@ -35,6 +36,7 @@ class WorldMap(tk.Canvas):
         self._tile_items = {}
         self._last_zoom = None
         self.candidates, self.controls, self.pending_point = [], [], None
+        self.ground_truth = None
         self.selected = 0
         self._drag = None
         self._scheduled = None
@@ -201,7 +203,8 @@ class WorldMap(tk.Canvas):
             return
         view = (self.zoom, self.center, self.winfo_width(), self.winfo_height(),
                 tuple((c["latitude"], c["longitude"]) for c in self.candidates),
-                tuple((p.latitude, p.longitude) for p in self.controls))
+                tuple((p.latitude, p.longitude) for p in self.controls),
+                (self.ground_truth["latitude"], self.ground_truth["longitude"]) if self.ground_truth else None)
         if self._label_view == view:
             return
         self.delete("map-label")
@@ -213,6 +216,9 @@ class WorldMap(tk.Canvas):
         for candidate in self.candidates:
             x, y = self.to_screen(candidate["latitude"], candidate["longitude"])
             occupied.append((x - 24, y - 24, x + 24, y + 24))
+        if self.ground_truth:
+            x, y = self.to_screen(self.ground_truth["latitude"], self.ground_truth["longitude"])
+            occupied.append((x - 42, y - 48, x + 42, y + 25))
         for point in self.controls:
             x, y = self.to_screen(point.latitude, point.longitude)
             occupied.append((x - 20, y - 20, x + 20, y + 20))
@@ -287,6 +293,13 @@ class WorldMap(tk.Canvas):
         self.tag_raise("map-label")
         # Overlay drawings get their own tag so tile arrivals never rebuild geography.
         previous_items = set(self.find_all())
+        if self.ground_truth:
+            x, y = self.to_screen(self.ground_truth["latitude"], self.ground_truth["longitude"])
+            before = set(self.find_all())
+            self._pin(x, y, self.translate("真"), "#c68a2c", 17)
+            self.create_text(x, y - 30, text=self.translate(self.ground_truth.get("label", "真实位置")), fill=WARNING, font=(FONT, 9, "bold"))
+            for item in set(self.find_all()) - before:
+                self.addtag_withtag("truth-marker", item)
         for index, candidate in reversed(list(enumerate(self.candidates))):
             x, y = self.to_screen(candidate["latitude"], candidate["longitude"])
             self._pin(x, y, str(index + 1), PRIMARY if index == self.selected else "#748b9a", 12)
@@ -297,21 +310,22 @@ class WorldMap(tk.Canvas):
         footer_height = 26 if self.online else 44
         attribution = ("© OpenStreetMap contributors · 在线道路底图使用 OSM 的边界表达" if self.online
                        else "边界：UN Geospatial / OCHA · 离线概览")
+        attribution = self.translate(attribution)
         self.create_rectangle(0, height - footer_height, width, height, fill=PANEL, outline="")
         self.create_text(10, height - footer_height + 13, text=attribution, anchor="w", fill=MAP_LABEL, font=(FONT, 8))
         if not self.online:
-            self.create_text(10, height - 12, text="来源地图边界不代表联合国对领土归属的认可。",
+            self.create_text(10, height - 12, text=self.translate("来源地图边界不代表联合国对领土归属的认可。"),
                              anchor="w", fill=MAP_LABEL, font=(FONT, 8))
             if width >= 660:
                 y = height - 31
                 self.create_line(width - 230, y, width - 205, y, fill=MAP_BORDER)
-                self.create_text(width - 199, y, text="国际边界", anchor="w", fill=MAP_LABEL, font=(FONT, 8))
+                self.create_text(width - 199, y, text=self.translate("国际边界"), anchor="w", fill=MAP_LABEL, font=(FONT, 8))
                 self.create_line(width - 125, y, width - 100, y, fill=MAP_DASH, dash=(5, 3))
-                self.create_text(width - 94, y, text="虚线边界", anchor="w", fill=MAP_LABEL, font=(FONT, 8))
+                self.create_text(width - 94, y, text=self.translate("虚线边界"), anchor="w", fill=MAP_LABEL, font=(FONT, 8))
         if self.online and any(key in self._failed for key in self._needed):
-            self.create_text(10, 16, text="部分道路底图暂不可用，已保留离线轮廓", anchor="w", fill=WARNING, font=(FONT, 9))
+            self.create_text(10, 16, text=self.translate("部分道路底图暂不可用，已保留离线轮廓"), anchor="w", fill=WARNING, font=(FONT, 9))
         if not self.online and self.zoom >= 7:
-            self.create_text(10, 16, text="离线轮廓不含道路；可启用在线道路底图", anchor="w", fill=MAP_LABEL, font=(FONT, 9))
+            self.create_text(10, 16, text=self.translate("离线轮廓不含道路；可启用在线道路底图"), anchor="w", fill=MAP_LABEL, font=(FONT, 9))
         for item in set(self.find_all()) - previous_items:
             self.addtag_withtag("overlay", item)
         if self.on_view and self.zoom != self._last_zoom:

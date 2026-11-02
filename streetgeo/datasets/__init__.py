@@ -1,1 +1,1 @@
-"""StreetGeo application package."""
+"""S.V.G.T. application package."""

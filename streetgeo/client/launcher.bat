@@ -1,4 +1,5 @@
 @echo off
+title S.V.G.T. - Prediction Client
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
 cd /d "%~dp0"

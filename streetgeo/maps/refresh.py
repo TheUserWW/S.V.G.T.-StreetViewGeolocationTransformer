@@ -19,7 +19,7 @@ DISCLAIMER = ("The boundaries and names shown and the designations used on this 
 def get_json(url, **parameters):
     if parameters:
         url += "?" + urlencode(parameters)
-    request = Request(url, headers={"User-Agent": "StreetGeoOfflineMap/1.0"})
+    request = Request(url, headers={"User-Agent": "SVGTOfflineMap/1.0"})
     with urlopen(request, timeout=90) as response:
         result = json.load(response)
     if "error" in result:

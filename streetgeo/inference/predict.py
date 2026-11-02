@@ -11,7 +11,7 @@ from streetgeo.core.config import TrainConfig
 from streetgeo.datasets.images import load_image
 
 
-def predict_images(model, image_paths, *, headings=None, top_k=5):
+def predict_images(model, image_paths, *, headings=None, top_k=5, google_coverage_only=False):
     if not 1 <= len(image_paths) <= model.config.max_views:
         raise ValueError(f"provide 1..{model.config.max_views} images of the SAME location")
     device = next(model.parameters()).device
@@ -24,7 +24,11 @@ def predict_images(model, image_paths, *, headings=None, top_k=5):
             raise ValueError("headings must be finite numbers or None")
         direction_tensor = torch.tensor([[float("nan") if value is None else value
                                           for value in headings]], device=device)
-    return model.predict(images.unsqueeze(0).to(device), headings=direction_tensor, top_k=top_k)[0]
+    options = {}
+    if google_coverage_only:
+        from streetgeo.inference.coverage import google_coverage_mask
+        options["coordinate_filter"] = google_coverage_mask
+    return model.predict(images.unsqueeze(0).to(device), headings=direction_tensor, top_k=top_k, **options)[0]
 
 
 def main():
@@ -34,10 +38,13 @@ def main():
     parser.add_argument("--headings", nargs="+", type=float, help="degrees clockwise from north")
     parser.add_argument("--top-k", type=int, default=1)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--google-coverage-only", action="store_true",
+                        help="restrict coordinates to the offline Google Street View country/region allowlist (not road-level coverage)")
     parser.add_argument("--json", action="store_true", help="include candidate scores and Maps URLs")
     args = parser.parse_args()
     model = load_model(args.checkpoint, args.device)
-    predictions = predict_images(model, args.images, headings=args.headings, top_k=args.top_k)
+    predictions = predict_images(model, args.images, headings=args.headings, top_k=args.top_k,
+                                 google_coverage_only=args.google_coverage_only)
     if args.json:
         print(json.dumps([{"coordinates": p.coordinates, "latitude": p.latitude,
                            "longitude": p.longitude, "cell_probability": p.probability,

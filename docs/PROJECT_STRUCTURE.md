@@ -1,4 +1,4 @@
-# Project structure
+# S.V.G.T. project structure
 
 ```text
 GeoGuesser/
@@ -7,20 +7,20 @@ GeoGuesser/
 │  ├─ core/                    Model, configuration, geographic grid, checkpoints
 │  ├─ datasets/                Image loading, OSV-5M import, splitting, legacy collection utilities
 │  ├─ training/                Training loop, sampling, recovery, stop requests
-│  ├─ inference/               Image prediction, model reuse, tile cache
+│  ├─ inference/               Prediction, shared explanation, model reuse, developer evaluation/charts, tile cache
 │  ├─ maps/                    Map data, projections, canvas, offline map refresh
-│  ├─ ui/                      Training/prediction windows and background tasks
+│  ├─ ui/                      Training/prediction windows, test reports, attention/occlusion window, background tasks
 │  ├─ cli/                     Hardware checks
 │  ├─ client/                  Standalone client builder and launcher templates
 │  └─ paths.py                 Workspace and map resource paths
 ├─ assets/maps/                Offline maps and provenance records
-├─ configs/                    Model configurations, including streetgeo_514m.json
-├─ clinet/                     Distributable client with best.pt and maps
+├─ configs/                    Model configurations: streetgeo_400m.json (default), streetgeo_514m.json (legacy)
+├─ clinet/                     Generated bilingual prediction client and maps; model weights distributed separately
 ├─ docs/                       Training plans and project documentation
 ├─ tests/                      Automated tests
 ├─ data/                       Existing street views and JSONL manifests
 ├─ checkpoints/                Existing models and resume states
-├─ .gui/                       Settings, logs, stop signals, tile cache
+├─ .gui/                       Settings, logs, stop signals, tile cache, evaluation reports
 └─ *.bat                       Training-workbench and prediction-map launchers
 ```
 

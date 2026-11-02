@@ -86,7 +86,7 @@ class TileTests(unittest.TestCase):
             cache = TileCache(folder, opener=opener, clock=lambda: now[0])
             self.assertEqual(cache.get(2, -1, 1).size, (256, 256))
             self.assertEqual(calls[0].full_url, "https://tile.openstreetmap.org/2/3/1.png")
-            self.assertIn("StreetGeoLocalMap", calls[0].get_header("User-agent"))
+            self.assertIn("SVGTLocalMap", calls[0].get_header("User-agent"))
             cache.get(2, 3, 1)
             TileCache(folder, opener=opener, clock=lambda: now[0]).get(2, 3, 1)
             self.assertEqual(len(calls), 1)
@@ -156,6 +156,7 @@ class GuiIntegrationTests(unittest.TestCase):
         self.root.deiconify()
         self.root.update()
         self.assertTrue(app.map._world_overview)
+
         # A local viewport must never become a filter for later model results.
         app.map.focus(38, -98, 8)
         places = [(-33.8688, 151.2093), (35.6762, 139.6503),
@@ -183,6 +184,17 @@ class GuiIntegrationTests(unittest.TestCase):
         self.assertEqual(app.candidates, candidates)
         app.world_view()
         self.assertTrue(app.map._world_overview)
+
+    def test_coverage_toggle_clears_old_result_and_persists(self):
+        app = self.app
+        app.manual.set("34.0522, -118.2437")
+        app.use_manual()
+        self.assertIsNotNone(app.result)
+        app.google_coverage_only.set(True)
+        app._coverage_changed()
+        self.assertIsNone(app.result)
+        self.assertEqual(app.map.candidates, [])
+        self.assertTrue(json.loads(app.settings_path.read_text(encoding="utf-8"))["google_coverage_only"])
 
     def test_manual_result_and_screenshot_calibration_survive_preview_resize(self):
         app = self.app

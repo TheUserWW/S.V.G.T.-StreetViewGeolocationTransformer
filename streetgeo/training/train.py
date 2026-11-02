@@ -17,16 +17,24 @@ from streetgeo.core.config import ModelConfig, TrainConfig
 from streetgeo.datasets.images import StreetViewDataset, collate_streetviews
 from streetgeo.core.geography import haversine_km
 from streetgeo.core.model import StreetGeoModel
+from streetgeo.paths import validate_checkpoint_path
 from streetgeo.training.runtime import EpochBatchSampler, StopRequest, ignore_worker_interrupts, manifest_fingerprint
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, stop_request=None):
+def evaluate(model, loader, device, stop_request=None, progress=None):
     was_training = model.training
     model.eval()
     errors, total_loss, count = [], 0.0, 0
+    total_batches = len(loader)
+    started = time.monotonic()
+    def report(batch):
+        if progress:
+            progress({"batch": batch, "total_batches": total_batches, "samples": count,
+                      "total_samples": len(loader.dataset), "seconds": time.monotonic() - started})
     try:
-        for batch in loader:
+        report(0)
+        for batch_number, batch in enumerate(loader, 1):
             if stop_request is not None and stop_request.requested:
                 return None
             batch = {name: value.to(device) for name, value in batch.items()}
@@ -35,6 +43,8 @@ def evaluate(model, loader, device, stop_request=None):
             count += size
             total_loss += output.loss.item() * size
             errors.append(haversine_km(output.coordinates, batch["targets"]).cpu())
+            if batch_number == 1 or batch_number % 10 == 0 or batch_number == total_batches:
+                report(batch_number)
         errors = torch.cat(errors)
         metrics = {"loss": total_loss / count, "mean_km": errors.mean().item(),
                    "median_km": torch.quantile(errors, 0.5).item()}
@@ -114,7 +124,7 @@ def train(args):
     if state is not None and state.get("resume_version") != 1:
         raise ValueError("This is an inference-only checkpoint. Use --init-from, or resume a *.last.pt file")
     run = _run_config(args, state["run_config"] if state else None)
-    output_path = Path(args.output or (state["output_path"] if state else TrainConfig().model_path)).resolve()
+    output_path = validate_checkpoint_path(args.output or (state["output_path"] if state else TrainConfig().model_path)).resolve()
     last_path = output_path.with_name(output_path.stem + ".last" + output_path.suffix)
     if not state and (last_path.exists() or output_path.exists()):
         raise FileExistsError(f"Training output already exists. Use --resume {last_path}, or choose a new --output")
@@ -191,6 +201,7 @@ def train(args):
 
     def save_progress(reason):
         nonlocal last_saved_at
+        print(json.dumps({"event": "training_phase", "phase": "saving", "reason": reason}), flush=True)
         save_checkpoint(model, last_path, keep_previous=True, training_state={
             "resume_version": 1, "dataset_source": "OpenStreetView-5M", "run_config": run, "amp_mode": amp_mode,
             "epoch": epoch, "next_batch": next_batch, "global_step": step,
@@ -220,10 +231,15 @@ def train(args):
                 return
             while epoch < run["epochs"]:
                 model.train()
+                if next_batch < batches_per_epoch:
+                    print(json.dumps({"event": "training_phase", "phase": "training", "epoch": epoch + 1}), flush=True)
                 sampler = EpochBatchSampler(len(train_data), run["batch_size"], run["seed"], epoch, next_batch)
                 # DataLoader's worker base seed must not consume the model's RNG.
-                loader = DataLoader(train_data, batch_sampler=sampler, **loader_options,
-                                    generator=torch.Generator().manual_seed(run["seed"] + epoch + 10000))
+                # An epoch interrupted during validation has no training batches left.
+                # Avoid spawning Windows workers and copying the entire training dataset.
+                loader = () if next_batch == batches_per_epoch else DataLoader(
+                    train_data, batch_sampler=sampler, **loader_options,
+                    generator=torch.Generator().manual_seed(run["seed"] + epoch + 10000))
                 for batch in loader:
                     if step < warmup:
                         factor = (step + 1) / warmup
@@ -262,7 +278,9 @@ def train(args):
                         save_progress("periodic")
                 metrics = {"epoch": epoch + 1, "step": step, "train_loss": epoch_loss / epoch_examples}
                 if val_loader is not None:
-                    validation = evaluate(model, val_loader, device, stop_request=stop)
+                    validation = evaluate(model, val_loader, device, stop_request=stop,
+                                          progress=lambda details: print(json.dumps({"event": "validation_progress",
+                                              "epoch": epoch + 1, **details}), flush=True))
                     if validation is None:
                         save_progress("graceful_stop_during_validation")
                         return
@@ -271,6 +289,7 @@ def train(args):
                 criterion = metrics["validation"]["median_km"] if val_loader is not None else metrics["train_loss"]
                 if criterion < best_metric:
                     best_metric = criterion
+                    print(json.dumps({"event": "training_phase", "phase": "saving", "reason": "best_model"}), flush=True)
                     save_checkpoint(model, output_path, training_state={"metrics": metrics, "global_step": step})
                 epoch += 1
                 next_batch, epoch_loss, epoch_examples = 0, 0.0, 0

@@ -11,10 +11,12 @@ import queue
 import subprocess
 import sys
 import tkinter as tk
+from streetgeo import PROJECT_SHORT_NAME
 from tkinter import filedialog, ttk
 
-from streetgeo.ui.backend import (DEFAULTS, ROOT, ProcessRunner, build_prepare,
-                         build_training, load_settings, resolve_path, save_settings)
+from streetgeo.ui.backend import (DEFAULTS, ROOT, MODEL_PRESETS, CUSTOM_MODEL_PRESET, ProcessRunner,
+                         build_prepare, build_gpu_check, build_training, load_settings, model_preset_for_config,
+                         new_model_output, resolve_path, save_settings)
 
 from streetgeo.ui.common import (BG, PANEL, NAV, TEXT, MUTED, BORDER, ACCENT, FONT,
                                  SURFACE, INPUT, DISABLED, SELECTION, WARNING, CHART_FILL,
@@ -88,7 +90,7 @@ class TrainingApp:
 
     def _build(self):
         root = self.root
-        root.title("StreetGeo · 训练工作台")
+        root.title(f"{PROJECT_SHORT_NAME} · 训练工作台")
         apply_dark_theme(root)
         width = min(1460, int(root.winfo_screenwidth() * 0.9))
         height = min(1020, int(root.winfo_screenheight() * 0.9))
@@ -102,7 +104,7 @@ class TrainingApp:
         brand.create_oval(1, 2, 33, 34, outline="#60d4bd", width=2)
         brand.create_oval(10, 2, 24, 34, outline="#60d4bd", width=1)
         brand.create_line(1, 18, 33, 18, fill="#60d4bd")
-        brand.create_text(0, 58, text="STREETGEO", anchor="w", fill="white", font=("Segoe UI", 12, "bold"))
+        brand.create_text(0, 58, text=PROJECT_SHORT_NAME, anchor="w", fill="white", font=("Segoe UI", 12, "bold"))
         brand.create_text(0, 80, text="TRAINING STUDIO", anchor="w", fill="#8aa4b8", font=("Segoe UI", 8))
         label(sidebar, "工作流程", color="#7f9bad", size=9).pack(fill="x", padx=22, pady=(10, 12))
         for key, text in (("split", "01   导入与划分"), ("train", "02   模型训练")):
@@ -170,7 +172,7 @@ class TrainingApp:
         scrollbar.configure(command=self.log.yview)
         self.footer_text = label(main, "就绪  ·  配置仅保存在本机 · 仅接受 OpenStreetView-5M", color=MUTED, size=9)
         self.footer_text.pack(fill="x", pady=(10, 0))
-        self._append_log("欢迎使用 StreetGeo 训练工作台。仅支持 OpenStreetView-5M，自动跳过尚未下载的图片。默认模型约 514MiB，升级架构需新建训练。")
+        self._append_log(f"欢迎使用 {PROJECT_SHORT_NAME}（Street-View Geolocation Transformer）训练工作台。仅支持 OpenStreetView-5M。可选原版 1.35 亿或新版 3.98 亿参数；切换架构需新建训练。")
 
     def _page(self, key, title, description):
         page = tk.Frame(self.page_host, bg=PANEL)
@@ -235,24 +237,28 @@ class TrainingApp:
         self._action(actions, "填入训练配置", self._use_splits)
 
     def _build_train(self):
-        fields, actions = self._page("train", "OSV-5M 全球街景训练", "新建默认约 514MiB / 1.35 亿参数；续训沿用权重架构。单视角 · 224×224 · BF16。")
-        editor = self._field(fields, "运行方式", "mode", 0, choices=("新建训练", "继续上次训练"))
+        fields, actions = self._page("train", "OSV-5M 全球街景训练", "可选原版 1.35 亿或新版 3.98 亿参数；续训沿用 checkpoint 架构。切换规模会填入建议批次大小和独立输出目录。")
+        preset = self._field(fields, "模型规模", "model_preset", 0, span=2,
+                             choices=(*MODEL_PRESETS, CUSTOM_MODEL_PRESET))
+        preset.bind("<<ComboboxSelected>>", lambda _: self._model_preset_changed())
+        self.values["model_config"].trace_add("write", lambda *_: self._model_config_changed())
+        editor = self._field(fields, "运行方式", "mode", 1, choices=("新建训练", "继续上次训练"))
         editor.bind("<<ComboboxSelected>>", lambda _: self._mode_changed())
-        self._field(fields, "训练设备", "device", 0, 1, choices=("cuda", "auto", "cpu"))
-        self._field(fields, "恢复进度 / *.last.pt", "resume", 1, span=2, browse="checkpoint")
-        self._field(fields, "OSV-5M 训练清单", "train_manifest", 2, span=2, browse="manifest")
-        self._field(fields, "OSV-5M 验证清单（可留空）", "val_manifest", 3, span=2, browse="manifest")
-        self._field(fields, "最佳模型输出文件", "output", 4, span=2, browse="save_checkpoint")
-        self._field(fields, "训练轮数 / epochs", "epochs", 5)
-        self._field(fields, "批次大小 / batch size", "batch_size", 5, 1)
-        self._field(fields, "训练精度", "amp", 6, choices=("bf16", "fp16", "off", "auto"))
-        self._field(fields, "数据读取进程数", "num_workers", 6, 1)
-        self._field(fields, "每多少批次保存一次", "save_every_steps", 7)
-        self._field(fields, "最长保存间隔 / 秒（0 关闭）", "save_every_seconds", 7, 1)
-        self._field(fields, "初始学习率", "learning_rate", 8)
-        self._field(fields, "预热步数", "warmup_steps", 8, 1)
-        self._field(fields, "自定义模型配置（可选 JSON）", "model_config", 9, span=2, browse="json")
-        self._field(fields, "新阶段初始权重（可选）", "init_from", 10, span=2, browse="checkpoint")
+        self._field(fields, "训练设备", "device", 1, 1, choices=("cuda", "auto", "cpu"))
+        self._field(fields, "恢复进度 / *.last.pt", "resume", 2, span=2, browse="checkpoint")
+        self._field(fields, "OSV-5M 训练清单", "train_manifest", 3, span=2, browse="manifest")
+        self._field(fields, "OSV-5M 验证清单（可留空）", "val_manifest", 4, span=2, browse="manifest")
+        self._field(fields, "最佳模型输出文件", "output", 5, span=2, browse="save_checkpoint")
+        self._field(fields, "训练轮数 / epochs", "epochs", 6)
+        self._field(fields, "批次大小 / batch size", "batch_size", 6, 1)
+        self._field(fields, "训练精度", "amp", 7, choices=("bf16", "fp16", "off", "auto"))
+        self._field(fields, "数据读取进程数", "num_workers", 7, 1)
+        self._field(fields, "每多少批次保存一次", "save_every_steps", 8)
+        self._field(fields, "最长保存间隔 / 秒（0 关闭）", "save_every_seconds", 8, 1)
+        self._field(fields, "初始学习率", "learning_rate", 9)
+        self._field(fields, "预热步数", "warmup_steps", 9, 1)
+        self._field(fields, "模型配置 JSON（可自定义）", "model_config", 10, span=2, browse="json")
+        self._field(fields, "新阶段初始权重（可选）", "init_from", 11, span=2, browse="checkpoint")
         self.train_start = self._action(actions, "开始训练", self._train, primary=True)
         self._action(actions, "读取续训信息", self._inspect_checkpoint)
         self._mode_changed()
@@ -300,7 +306,7 @@ class TrainingApp:
         resume = self.values["mode"].get() == "继续上次训练"
         if hasattr(self, "train_start"):
             self.train_start.configure(text="继续训练" if resume else "开始训练")
-        keys = ("train_manifest", "val_manifest", "output", "epochs", "batch_size", "amp", "learning_rate",
+        keys = ("model_preset", "train_manifest", "val_manifest", "output", "epochs", "batch_size", "amp", "learning_rate",
                 "warmup_steps", "model_config", "init_from")
         for key in keys:
             editor = self.editors.get(key)
@@ -311,6 +317,26 @@ class TrainingApp:
         if "resume" in self.editors:
             self.editors["resume"].configure(state="normal" if resume else "disabled")
             self.browse_buttons["resume"].configure(state="normal" if resume else "disabled")
+
+    def _model_config_changed(self):
+        self.values["model_preset"].set(model_preset_for_config(self.values["model_config"].get()))
+
+    def _model_preset_changed(self):
+        name = self.values["model_preset"].get()
+        if name == CUSTOM_MODEL_PRESET:
+            self._browse("model_config", "json")
+            self._model_config_changed()
+            return
+        preset = MODEL_PRESETS[name]
+        self.values["model_config"].set(preset["config"])
+        self.values["batch_size"].set(preset["batch_size"])
+        self.values["amp"].set("bf16" if self.values["device"].get() != "cpu" else "off")
+        self.values["init_from"].set("")
+        candidate = new_model_output(preset["config"])
+        self.values["output"].set(str(candidate))
+        self.values["resume"].set(str(candidate.with_name(candidate.stem + ".last" + candidate.suffix)))
+        self._persist()
+        self.detail_label.configure(text=f"已选择{name}；新建训练，建议 batch {preset['batch_size']}。", fg=ACCENT)
 
     def _show_page(self, key):
         self.active_page = key
@@ -405,14 +431,9 @@ class TrainingApp:
         self.values["train_manifest"].set(str(output / "train.jsonl"))
         self.values["val_manifest"].set(str(output / "val.jsonl"))
         self.values["mode"].set("新建训练")
-        name = "streetgeo_514m_osv"
-        candidate = ROOT / "checkpoints" / name / "best.pt"
-        suffix = 2
-        while candidate.exists() or candidate.with_name("best.last.pt").exists():
-            candidate = ROOT / "checkpoints" / f"{name}_{suffix}" / "best.pt"
-            suffix += 1
+        candidate = new_model_output(self.values["model_config"].get())
         self.values["output"].set(str(candidate))
-        self.values["resume"].set(str(candidate.with_name("best.last.pt")))
+        self.values["resume"].set(str(candidate.with_name(candidate.stem + ".last" + candidate.suffix)))
         self.values["init_from"].set("")
         self._mode_changed()
         self._show_page("train")
@@ -453,7 +474,10 @@ class TrainingApp:
             self._error(error)
 
     def _gpu_check(self):
-        self._start("gpu", "streetgeo.cli.check_gpu", ["--batch-size", "16"])
+        try:
+            self._start("gpu", "streetgeo.cli.check_gpu", build_gpu_check(self._settings()))
+        except ValueError as error:
+            self._error(error)
 
     def _append_log(self, text):
         self.log.configure(state="normal")
@@ -491,6 +515,24 @@ class TrainingApp:
             self.detail_label.configure(text=f"已准备 {data['samples']:,} 张 · " +
                                              " / ".join(f"{key}: {value:,}" for key, value in data["source_counts"].items()), fg=ACCENT)
         event = data.get("event")
+        if event == "validation_progress":
+            completed, total = data["batch"], data["total_batches"]
+            self.progress.stop()
+            self.progress.configure(mode="determinate", value=100 * completed / max(1, total))
+            self.status_badge.configure(text="●  验证中", fg=ACCENT)
+            self.task_label.configure(text=f"第 {data['epoch']} 轮验证中")
+            self.detail_label.configure(text=f"本轮训练批次已结束，正在评估定位精度。\n验证 {completed:,}/{total:,} 批 · {data['samples']:,}/{data['total_samples']:,} 张图片", fg=MUTED)
+            return
+        if event == "training_phase":
+            saving = data["phase"] == "saving"
+            self.status_badge.configure(text="●  保存中" if saving else "●  训练中", fg=ACCENT)
+            self.task_label.configure(text="正在保存模型" if saving else "模型训练中")
+            self.detail_label.configure(text="正在写入 checkpoint，保存完成后将继续或结束任务。" if saving else "正在处理训练批次；每轮结束后还需验证和保存。", fg=MUTED)
+            if saving:
+                self.progress.stop()
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(15)
+            return
         if event == "hardware":
             gpu = data["gpu"].replace("NVIDIA GeForce ", "")
             self.hardware.configure(text=f"{gpu} · {data['vram_gib']:.0f} GB\nPyTorch {data['torch']} · 可用磁盘 {data['disk_free_gib']:.0f} GiB")
@@ -508,6 +550,11 @@ class TrainingApp:
             for key in ("epochs", "batch_size", "learning_rate", "warmup_steps", "amp"):
                 if key in data["run_config"]:
                     self.values[key].set(str(data["run_config"][key]))
+            if "model_config" in data:
+                name = model_preset_for_config(data["model_config"])
+                if name in MODEL_PRESETS:
+                    self.values["model_config"].set(MODEL_PRESETS[name]["config"])
+                self.values["model_preset"].set(name)
             self.metric_labels["step"].configure(text=str(data["step"]))
             self.metric_labels["epoch"].configure(text=str(data["epoch"] + 1))
             self.detail_label.configure(text=f"可恢复：已完成 {data['step']} 批次，下次从第 {data['epoch'] + 1} 轮的批次 {data['next_batch'] + 1} 继续。", fg=ACCENT)
@@ -611,7 +658,7 @@ class TrainingApp:
             self.closing = True
             if self.runner.busy:
                 self._stop()
-            self.root.title("StreetGeo · 正在安全退出…")
+            self.root.title(f"{PROJECT_SHORT_NAME} · 正在安全退出…")
             self.detail_label.configure(text="正在等待当前任务安全结束，然后关闭窗口。", fg=MUTED)
         else:
             self.root.destroy()

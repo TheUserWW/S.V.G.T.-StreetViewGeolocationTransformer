@@ -12,22 +12,56 @@ import sys
 import threading
 import uuid
 
-from streetgeo.paths import ROOT
+from streetgeo.paths import ROOT, validate_checkpoint_path
 DATA_SOURCES = ("OpenStreetView-5M（部分图片可用）",)
+MODEL_PRESETS = {
+    "1.35 亿参数（原版 · 514 MiB）": {
+        "config": "configs/streetgeo_514m.json", "batch_size": "64", "directory": "streetgeo_514m_osv",
+    },
+    "3.98 亿参数（新版 · 1.48 GiB）": {
+        "config": "configs/streetgeo_400m.json", "batch_size": "32", "directory": "streetgeo_400m_osv",
+    },
+}
+CUSTOM_MODEL_PRESET = "自定义 JSON 配置"
+DEFAULT_MODEL_PRESET = "3.98 亿参数（新版 · 1.48 GiB）"
 DEFAULTS = {
     "split_output": "data/world_osv_514m", "data_source": DATA_SOURCES[0],
     "osv_root": "data/OpenStreetView-5M", "block_degrees": "0.02", "guard_m": "250",
     "train_manifest": "data/world_osv_514m/train.jsonl", "val_manifest": "data/world_osv_514m/val.jsonl",
-    "output": "checkpoints/streetgeo_514m_osv/best.pt", "resume": "checkpoints/streetgeo_514m_osv/best.last.pt",
-    "mode": "新建训练", "epochs": "4", "batch_size": "64", "num_workers": "4",
+    "output": "checkpoints/streetgeo_400m_osv/best.pt", "resume": "checkpoints/streetgeo_400m_osv/best.last.pt",
+    "mode": "新建训练", "epochs": "4", "batch_size": "32", "num_workers": "4",
     "device": "cuda", "amp": "bf16", "learning_rate": "0.0003", "warmup_steps": "1000",
-    "save_every_steps": "500", "save_every_seconds": "300", "model_config": "", "init_from": "",
+    "save_every_steps": "500", "save_every_seconds": "300", "model_config": "configs/streetgeo_400m.json", "init_from": "",
+    "model_preset": DEFAULT_MODEL_PRESET,
 }
 
 
 def resolve_path(value):
     path = Path(str(value).strip()).expanduser()
     return path if path.is_absolute() else ROOT / path
+
+
+def model_preset_for_config(value):
+    if isinstance(value, dict):
+        return next((name for name, preset in MODEL_PRESETS.items()
+                     if json.loads(resolve_path(preset["config"]).read_text(encoding="utf-8")) == value),
+                    CUSTOM_MODEL_PRESET)
+    if not str(value).strip():
+        return DEFAULT_MODEL_PRESET
+    selected = resolve_path(value).resolve()
+    return next((name for name, preset in MODEL_PRESETS.items()
+                 if selected == resolve_path(preset["config"]).resolve()), CUSTOM_MODEL_PRESET)
+
+
+def new_model_output(model_config, filename="best.pt"):
+    preset = MODEL_PRESETS.get(model_preset_for_config(model_config), {})
+    directory = ROOT / "checkpoints" / preset.get("directory", "streetgeo_custom_osv")
+    candidate = directory / filename
+    suffix = 2
+    while candidate.exists() or candidate.with_name(candidate.stem + ".last" + candidate.suffix).exists():
+        candidate = directory / f"{Path(filename).stem}_{suffix}{Path(filename).suffix}"
+        suffix += 1
+    return candidate
 
 
 def load_settings(path):
@@ -39,6 +73,7 @@ def load_settings(path):
     except (OSError, ValueError, TypeError):
         pass
     result["data_source"] = DATA_SOURCES[0]
+    result["model_preset"] = model_preset_for_config(result["model_config"])
     return result
 
 
@@ -84,6 +119,14 @@ def build_prepare(values, stop_file=None):
     return arguments
 
 
+def build_gpu_check(values):
+    arguments = ["--batch-size", str(number(values, "batch_size", "批次大小", integer=True, strict=True))]
+    arguments += ["--amp", values["amp"]]
+    if values["model_config"].strip():
+        arguments += ["--model-config", input_file(values["model_config"], "模型配置")]
+    return arguments
+
+
 def build_training(values, stop_file):
     device, amp = values["device"], values["amp"]
     if device not in ("auto", "cuda", "cpu") or amp not in ("auto", "bf16", "fp16", "off"):
@@ -97,9 +140,9 @@ def build_training(values, stop_file):
         return arguments + ["--resume", input_file(values["resume"], "续训 checkpoint")]
     if device == "cpu" and amp in ("bf16", "fp16"):
         raise ValueError("CPU 训练请选择 off 或 auto 精度")
-    output = resolve_path(values["output"])
     if not values["output"].strip():
         raise ValueError("请选择模型输出文件")
+    output = validate_checkpoint_path(resolve_path(values["output"]))
     if output.exists() or output.with_name(output.stem + ".last" + output.suffix).exists():
         raise ValueError("该位置已有训练进度，请选择“继续上次训练”或更换输出文件")
     from streetgeo.datasets.policy import check_osv_manifest_header
