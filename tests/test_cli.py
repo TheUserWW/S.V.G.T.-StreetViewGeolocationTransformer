@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from streetgeo.__main__ import main
+from streetgeo.__main__ import COMMANDS, main
 
 
 class CommandLineTests(unittest.TestCase):
@@ -13,11 +13,14 @@ class CommandLineTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output), patch("streetgeo.__main__.importlib.import_module") as imported:
             main([])
-            self.assertIn("refresh-map", output.getvalue())
+            self.assertIn("Train or resume a Mapillary model", output.getvalue())
             imported.assert_not_called()
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
             main(["missing-command"])
         self.assertEqual(error.exception.code, 2)
+
+    def test_public_commands_are_limited_to_training_and_data(self):
+        self.assertEqual(set(COMMANDS), {"train", "download", "prepare", "split", "check-gpu"})
 
     def test_subcommand_receives_help_and_space_containing_arguments(self):
         received = []

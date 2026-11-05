@@ -6,18 +6,11 @@ from streetgeo import PROJECT_TITLE
 
 
 COMMANDS = {
-    "gui": ("streetgeo.ui.training", "Open the training workbench"),
-    "map": ("streetgeo.ui.prediction", "Open the local prediction map"),
-    "workspace": ("streetgeo.client.workbench", "Open the daily prediction and correction workspace"),
     "train": ("streetgeo.training.train", "Train or resume a Mapillary model"),
-    "predict": ("streetgeo.inference.predict", "Predict coordinates from local images"),
     "download": ("streetgeo.datasets.download_mapillary", "Download Mapillary street views"),
     "prepare": ("streetgeo.datasets.prepare", "Import and split Mapillary"),
     "split": ("streetgeo.datasets.split", "Split a Mapillary JSONL manifest"),
     "check-gpu": ("streetgeo.cli.check_gpu", "Check CUDA training capacity"),
-    "refresh-map": ("streetgeo.maps.refresh", "Refresh offline UN reference geography"),
-    "worker": ("streetgeo.ui.worker", "Run a workbench inspection task"),
-    "build-client": ("streetgeo.client.build", "Build the standalone prediction client folder"),
 }
 
 

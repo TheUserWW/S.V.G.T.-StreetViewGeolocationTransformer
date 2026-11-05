@@ -14,7 +14,6 @@ from streetgeo.core.config import ModelConfig
 from streetgeo.datasets.images import StreetViewDataset, collate_streetviews, load_image
 from streetgeo.core.geography import HierarchicalGeoGrid, LocationPrediction, haversine_km
 from streetgeo.core.model import StreetGeoModel, MultiHeadAttention
-from streetgeo.inference.predict import predict_images
 
 torch.set_num_threads(2)
 
@@ -199,13 +198,7 @@ class PipelineTests(unittest.TestCase):
             ], capture_output=True, text=True, timeout=90, env=env)
             self.assertEqual(trained.returncode, 0, trained.stdout + trained.stderr)
             model = load_model(checkpoint, "cpu")
-            self.assertEqual(len(predict_images(model, [folder / "front.jpg"], top_k=2)), 2)
-            predicted = subprocess.run([
-                sys.executable, "-m", "streetgeo", "predict", str(folder / "front.jpg"),
-                "--checkpoint", str(checkpoint), "--device", "cpu", "--json",
-            ], capture_output=True, text=True, timeout=60, env=env)
-            self.assertEqual(predicted.returncode, 0, predicted.stdout + predicted.stderr)
-            self.assertIn("maps_url", json.loads(predicted.stdout)[0])
+            self.assertEqual(model.config.image_size, 32)
 
 
 if __name__ == "__main__":
