@@ -1,5 +1,7 @@
 # Street-View Geolocation Transformer (S.V.G.T.)
 
+[Try it on Hugging Face / Model weights](https://huggingface.co/TheUserWW/S.V.G.T.-StreetViewGeolocationTransformer)
+
 **Street-View Geolocation Transformer (S.V.G.T.)** estimates geographic coordinates from street-view images. The model accepts a single perspective image or up to four views of the same location. It returns latitude and longitude, such as `34.052200, -118.243700`, along with ranked geographic candidates.
 
 This repository provides the PyTorch model, Mapillary data tools, and command-line training and resume interfaces. Model weights and datasets are distributed separately from the source files.
