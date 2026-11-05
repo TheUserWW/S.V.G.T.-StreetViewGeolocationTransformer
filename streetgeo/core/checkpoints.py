@@ -9,11 +9,13 @@ import tempfile
 
 import torch
 
-from streetgeo.core.config import ModelConfig
+from streetgeo.core.config import LEGACY_BACKBONE, SIGLIP2_BACKBONE, ModelConfig
 from streetgeo.core.model import StreetGeoModel
 from streetgeo.paths import validate_checkpoint_path
 
 ARCHITECTURE = "streetview_hierarchical_vit_v1"
+SIGLIP2_ARCHITECTURE = "streetview_siglip2_nmpz_v2"
+ARCHITECTURES = {LEGACY_BACKBONE: ARCHITECTURE, SIGLIP2_BACKBONE: SIGLIP2_ARCHITECTURE}
 
 
 def resolve_device(name="auto"):
@@ -32,7 +34,7 @@ def save_checkpoint(model, path, *, training_state=None, keep_previous=False):
     descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            torch.save({"architecture": ARCHITECTURE, "model_config": asdict(model.config),
+            torch.save({"architecture": ARCHITECTURES[model.config.vision_backbone], "model_config": asdict(model.config),
                         "model_state_dict": model.state_dict(),
                         "training_state": training_state or {}}, stream)
             stream.flush()
@@ -64,10 +66,14 @@ def restore_rng_state(state):
         torch.cuda.set_rng_state_all([value.cpu() for value in state["cuda"]])
 
 
-def read_checkpoint(path):
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(checkpoint, dict) or checkpoint.get("architecture") != ARCHITECTURE:
+def read_checkpoint(path, *, map_location="cpu"):
+    checkpoint = torch.load(path, map_location=map_location, weights_only=True)
+    if not isinstance(checkpoint, dict) or checkpoint.get("architecture") not in ARCHITECTURES.values():
         raise ValueError("Expected an S.V.G.T. visual checkpoint; old text GPT weights are incompatible")
+    config = checkpoint.get("model_config")
+    if (not isinstance(config, dict)
+            or ARCHITECTURES.get(config.get("vision_backbone", LEGACY_BACKBONE)) != checkpoint["architecture"]):
+        raise ValueError("Checkpoint architecture and model config disagree")
     return checkpoint
 
 

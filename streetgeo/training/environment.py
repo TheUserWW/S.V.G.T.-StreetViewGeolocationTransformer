@@ -1,4 +1,4 @@
-"""Parameter groups and frozen-prefix behavior for environment specialist fine-tuning."""
+"""Road-mask recipe and visual fine-tuning parameter groups."""
 from streetgeo.datasets.road_mask import RoadMask, MASK_FILL
 
 LEGACY_RECIPE = {"version": 1, "mask": "oriented_source_bottom_third", "fill_rgb": list(MASK_FILL),
@@ -26,26 +26,30 @@ def resolve_recipe(run, state=None, *, explicit_geometry=False):
 
 
 def parameter_groups(model, *, unfreeze_last, learning_rate, visual_learning_rate, weight_decay):
-    if not 1 <= unfreeze_last <= len(model.encoder.visual_blocks):
-        raise ValueError("unfreeze-last must be between 1 and the checkpoint's number of visual layers")
+    minimum = 0 if model.config.is_siglip2 else 1
+    if not minimum <= unfreeze_last <= len(model.encoder.visual_blocks):
+        raise ValueError(f"unfreeze-last must be between {minimum} and the checkpoint's number of visual layers")
     start = len(model.encoder.visual_blocks) - unfreeze_last
     visual, downstream = [], []
     for name, parameter in model.named_parameters():
-        terminal = name.startswith("encoder.visual_norm.") or any(
-            name.startswith(f"encoder.visual_blocks.{number}.") for number in range(start, start + unfreeze_last))
+        terminal = bool(unfreeze_last) and (name.startswith("encoder.visual_norm.") or any(
+            name.startswith(f"encoder.visual_blocks.{number}.") for number in range(start, start + unfreeze_last)))
         trainable = terminal or not name.startswith("encoder.") or name.startswith((
-            "encoder.pool_attention.", "encoder.pool_queries", "encoder.heading_embedding.",
+            "encoder.pool_", "encoder.heading_embedding.",
             "encoder.fusion_blocks.", "encoder.fusion_norm.", "encoder.geo_token"))
         parameter.requires_grad_(trainable)
         if trainable:
             (visual if terminal else downstream).append(parameter)
-    return [{"params": visual, "lr": visual_learning_rate, "base_learning_rate": visual_learning_rate,
-             "weight_decay": weight_decay, "name": "terminal_visual"},
-            {"params": downstream, "lr": learning_rate, "base_learning_rate": learning_rate,
-             "weight_decay": weight_decay, "name": "pool_fusion_location"}]
+    groups = []
+    if visual:
+        groups.append({"params": visual, "lr": visual_learning_rate, "base_learning_rate": visual_learning_rate,
+                       "weight_decay": weight_decay, "name": "terminal_visual"})
+    groups.append({"params": downstream, "lr": learning_rate, "base_learning_rate": learning_rate,
+                   "weight_decay": weight_decay, "name": "pool_fusion_location"})
+    return groups
 
 
 def train_mode(model, unfreeze_last):
     model.train()
-    for block in model.encoder.visual_blocks[:-unfreeze_last]:
+    for block in model.encoder.visual_blocks[:len(model.encoder.visual_blocks) - unfreeze_last]:
         block.eval()

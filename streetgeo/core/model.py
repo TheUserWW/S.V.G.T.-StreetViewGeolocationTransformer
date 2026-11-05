@@ -4,14 +4,14 @@ Images must be preprocessed with streetgeo.datasets.images.load_image; optional 
 clockwise from north. This module never downloads weights or training data.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import torch
 from torch import nn
 from torch.nn import functional as F
 
 from streetgeo.core import EmptyPredictionDomainError
 from streetgeo.core.config import ModelConfig
-from streetgeo.core.geography import HierarchicalGeoGrid, LocationPrediction, coordinates_to_unit_vectors
+from streetgeo.core.geography import HierarchicalGeoGrid, LocationPrediction, coordinates_to_unit_vectors, haversine_km
 
 
 class MultiHeadAttention(nn.Module):
@@ -41,13 +41,13 @@ class MultiHeadAttention(nn.Module):
 class Block(nn.Module):
     """Preserve the original pre-norm Transformer residual structure."""
 
-    def __init__(self, config):
+    def __init__(self, config, *, layer_norm_eps=1e-5, gelu_approximation="none"):
         super().__init__()
-        self.ln1 = nn.LayerNorm(config.n_embed)
+        self.ln1 = nn.LayerNorm(config.n_embed, eps=layer_norm_eps)
         self.attention = MultiHeadAttention(config)
-        self.ln2 = nn.LayerNorm(config.n_embed)
+        self.ln2 = nn.LayerNorm(config.n_embed, eps=layer_norm_eps)
         self.ffn = nn.Sequential(
-            nn.Linear(config.n_embed, config.mlp_ratio * config.n_embed), nn.GELU(),
+            nn.Linear(config.n_embed, config.mlp_ratio * config.n_embed), nn.GELU(approximate=gelu_approximation),
             nn.Linear(config.mlp_ratio * config.n_embed, config.n_embed),
             nn.Dropout(config.dropout),
         )
@@ -66,18 +66,40 @@ class StreetViewEncoder(nn.Module):
             3, config.n_embed, kernel_size=config.patch_size, stride=config.patch_size,
         )
         self.position_embedding = nn.Parameter(torch.zeros(1, patches, config.n_embed))
-        self.visual_blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
-        self.visual_norm = nn.LayerNorm(config.n_embed)
+        # SigLIP2 FixRes uses the SigLIP vision blocks with zero dropout,
+        # tanh-approximate GELU and a different LayerNorm epsilon.
+        vision = replace(config, dropout=0.0) if config.is_siglip2 else config
+        epsilon = 1e-6 if config.is_siglip2 else 1e-5
+        activation = "tanh" if config.is_siglip2 else "none"
+        self.visual_blocks = nn.ModuleList([
+            Block(vision, layer_norm_eps=epsilon, gelu_approximation=activation) for _ in range(config.n_layer)
+        ])
+        self.visual_norm = nn.LayerNorm(config.n_embed, eps=epsilon)
         self.pool_queries = nn.Parameter(torch.zeros(1, config.view_queries, config.n_embed))
         self.pool_attention = nn.MultiheadAttention(
             config.n_embed, config.n_head, dropout=config.dropout, batch_first=True,
         )
-        # No view-index embedding: unordered views remain permutation invariant.
-        self.heading_embedding = nn.Sequential(nn.Linear(3, config.n_embed), nn.GELU(),
-                                               nn.Linear(config.n_embed, config.n_embed))
-        self.geo_token = nn.Parameter(torch.zeros(1, 1, config.n_embed))
-        self.fusion_blocks = nn.ModuleList([Block(config) for _ in range(config.fusion_layers)])
-        self.fusion_norm = nn.LayerNorm(config.n_embed)
+        if config.is_siglip2:
+            self.pool_projection = nn.Linear(config.view_queries * config.n_embed, config.n_embed)
+            self.pool_mlp = nn.Sequential(
+                nn.LayerNorm(config.n_embed),
+                nn.Linear(config.n_embed, 2 * config.n_embed), nn.GELU(),
+                nn.Linear(2 * config.n_embed, config.n_embed),
+            )
+            self.pool_norm = nn.LayerNorm(config.n_embed)
+        else:
+            # No view-index embedding: unordered views remain permutation invariant.
+            self.heading_embedding = nn.Sequential(nn.Linear(3, config.n_embed), nn.GELU(),
+                                                   nn.Linear(config.n_embed, config.n_embed))
+            self.geo_token = nn.Parameter(torch.zeros(1, 1, config.n_embed))
+            self.fusion_blocks = nn.ModuleList([Block(config) for _ in range(config.fusion_layers)])
+            self.fusion_norm = nn.LayerNorm(config.n_embed)
+
+    def visual_tokens(self, images):
+        x = self.patch_embedding(images).flatten(2).transpose(1, 2) + self.position_embedding
+        for block in self.visual_blocks:
+            x = block(x)
+        return self.visual_norm(x)
 
     def forward(self, images, view_mask=None, headings=None):
         if images.ndim == 4:
@@ -101,14 +123,13 @@ class StreetViewEncoder(nn.Module):
         valid_images = images[view_mask]
         if not torch.isfinite(valid_images).all():
             raise ValueError("valid images must contain finite values")
-        x = self.patch_embedding(valid_images).flatten(2).transpose(1, 2)
-        x = x + self.position_embedding
-        for block in self.visual_blocks:
-            x = block(x)
-        x = self.visual_norm(x)
+        x = self.visual_tokens(valid_images)
         queries = self.pool_queries.expand(x.shape[0], -1, -1)
         pooled, _ = self.pool_attention(queries, x, x, need_weights=False)
         pooled = pooled + queries
+        if self.config.is_siglip2:
+            projected = self.pool_projection(pooled.flatten(1))
+            return self.pool_norm(projected + self.pool_mlp(projected))
         tokens = pooled.new_zeros(batch, views, self.config.view_queries, self.config.n_embed)
         tokens[view_mask] = pooled
         if headings is None:
@@ -150,6 +171,10 @@ class StreetGeoModel(nn.Module):
         self.config = config or ModelConfig()
         cfg = self.config
         self.grid = HierarchicalGeoGrid(cfg)
+        if cfg.geo_smoothing:
+            cell_ids = torch.arange(cfg.total_cells)
+            centers = self.grid.decode(cell_ids, torch.zeros(cfg.total_cells, 2))
+            self.register_buffer("cell_centers", centers, persistent=False)
         self.encoder = StreetViewEncoder(cfg)
         self.coarse_head = nn.Linear(cfg.n_embed, cfg.coarse_cells)
         self.fine_head = nn.Linear(cfg.n_embed, cfg.total_cells)
@@ -159,9 +184,23 @@ class StreetGeoModel(nn.Module):
             nn.Linear(cfg.n_embed, 2), nn.Tanh(),
         )
         self.apply(self._init_weights)
-        for parameter in (self.encoder.position_embedding, self.encoder.pool_queries,
-                          self.encoder.geo_token):
+        parameters = (self.encoder.position_embedding, self.encoder.pool_queries)
+        if not cfg.is_siglip2:
+            parameters += (self.encoder.geo_token,)
+        for parameter in parameters:
             nn.init.trunc_normal_(parameter, std=0.02)
+
+    def _smooth_cell_loss(self, log_probs, targets, true_ids):
+        with torch.no_grad():
+            temperature = self.config.geo_smoothing_km
+            distance = haversine_km(targets[:, None, :], self.cell_centers)
+            # Restrict the soft target to a local neighborhood. Always retain
+            # the true cell, including when its center is outside the radius.
+            excluded = (distance > 3 * temperature).scatter_(1, true_ids[:, None], False)
+            local_distance = distance.masked_fill(excluded, torch.inf)
+            relative = local_distance - local_distance.amin(dim=-1, keepdim=True)
+            weights = (-relative / temperature).float().softmax(dim=-1)
+        return -(weights * log_probs).sum(dim=-1).mean()
 
     @staticmethod
     def _init_weights(module):
@@ -246,8 +285,11 @@ class StreetGeoModel(nn.Module):
                 "offset": F.smooth_l1_loss(offsets, target_offsets),
                 "spherical": torch.linalg.vector_norm(predicted_xyz - target_xyz, dim=-1).mean(),
             }
-            loss = (losses["coarse"] + losses["fine"]
-                    + self.config.offset_loss_weight * losses["offset"]
+            classification = losses["coarse"] + losses["fine"]
+            if self.config.geo_smoothing:
+                losses["geo_smoothing"] = self._smooth_cell_loss(log_probs, targets, true_ids)
+                classification = torch.lerp(classification, losses["geo_smoothing"], self.config.geo_smoothing)
+            loss = (classification + self.config.offset_loss_weight * losses["offset"]
                     + self.config.spherical_loss_weight * losses["spherical"])
         return GeolocationOutput(coordinates[:, 0], coordinates, values.exp(), cell_ids,
                                  coarse, fine, F.normalize(embedding, dim=-1), loss, losses)

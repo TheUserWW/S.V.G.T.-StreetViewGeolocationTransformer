@@ -2,3 +2,6 @@ torch>=2.3
 Pillow>=10.0
 shapely>=2.0
 numpy>=1.26
+huggingface-hub>=0.27,<2
+safetensors>=0.5,<1
+netCDF4>=1.7,<2

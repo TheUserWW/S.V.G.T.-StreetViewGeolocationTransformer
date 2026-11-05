@@ -9,6 +9,7 @@ import torch
 
 from streetgeo.core.config import ModelConfig, TrainConfig
 from streetgeo.core.model import StreetGeoModel
+from streetgeo.training.environment import parameter_groups, train_mode
 
 
 def main():
@@ -16,6 +17,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=TrainConfig().batch_size)
     parser.add_argument("--model-config", type=Path, help="optional model configuration JSON")
     parser.add_argument("--amp", choices=("auto", "bf16", "fp16", "off"), default="bf16")
+    parser.add_argument("--unfreeze-last", type=int, help="number of terminal visual blocks to train")
     args = parser.parse_args()
     if args.batch_size <= 0:
         parser.error("batch-size must be positive")
@@ -30,7 +32,13 @@ def main():
     model = StreetGeoModel(config).cuda().train()
     images = torch.randn(args.batch_size, 3, config.image_size, config.image_size, device="cuda")
     targets = torch.tensor([[34.05, -118.25]], device="cuda").expand(args.batch_size, -1)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    groups = model.parameters()
+    layers = 0 if config.is_siglip2 and args.unfreeze_last is None else args.unfreeze_last
+    if layers is not None:
+        groups = parameter_groups(model, unfreeze_last=layers, learning_rate=3e-4,
+                                  visual_learning_rate=5e-6, weight_decay=.1)
+        train_mode(model, layers)
+    optimizer = torch.optim.AdamW(groups, lr=3e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=amp == "fp16")
     dtype = torch.bfloat16 if amp == "bf16" else torch.float16
     torch.cuda.reset_peak_memory_stats()
@@ -62,6 +70,7 @@ def main():
                       "peak_allocated_gib": torch.cuda.max_memory_allocated() / 1024 ** 3,
                       "peak_reserved_gib": torch.cuda.max_memory_reserved() / 1024 ** 3,
                       "parameters": sum(p.numel() for p in model.parameters()),
+                      "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
                       "fp32_weights_mib": sum(p.numel() * p.element_size() for p in model.parameters()) / 1024 ** 2,
                       "loss": output.loss.item(), "status": "passed"}, indent=2))
 

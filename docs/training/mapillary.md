@@ -51,6 +51,26 @@ python -m streetgeo train --download --prompt-token --countries JPN --download-o
 
 默认新版模型为 397,937,418 参数，FP32 权重约 1.48 GiB，配置 `configs/streetgeo_400m.json`。建议 batch 32、BF16、CUDA，4 个读取进程，学习率 0.0003，预热 1,000 步。原版 134,686,730 参数使用 `configs/streetgeo_514m.json`，建议 batch 64。模型规模取决于可用硬件；容量检查不等于定位精度。不同规模需新建训练，权重维度不兼容。
 
+## SigLIP2 NMPZ 单图训练
+
+在 **模型架构** 选择 **SigLIP2 NMPZ（单图）**。每条 Mapillary 记录使用一张街景图。新模型先冻结 Google 的 SigLIP2 Base/16/224 视觉主干，只训练四查询池化、投影和定位头。建议从 CUDA、BF16、batch 8 开始。首次训练可自动下载固定版本的官方 `model.safetensors`，也可以在界面选择该文件。项目会优先读取 `checkpoints/pretrained/siglip2-base-patch16-224/model.safetensors`。
+
+从工作区根目录启动训练：
+
+```powershell
+.venv\Scripts\python.exe -m streetgeo train --model-config configs/streetgeo_siglip2_nmpz.json --train-manifest data/world_mapillary/train.jsonl --val-manifest data/world_mapillary/val.jsonl --device cuda --amp bf16 --batch-size 8
+```
+
+预设使用硬标签。用 `--geo-smoothing 0.1` 和不同的 `--output` 可做轻度平滑对照，将联合分类目标的 10% 分配给按球面距离衰减的局部概率分布，衰减尺度为 250 km。若要在已有 NMPZ 权重上微调最后一层，可使用 `--init-from path/to/model.pt --siglip2-unfreeze-last 1 --visual-learning-rate 0.000005` 开始新阶段。完整续训使用同一训练任务的 `*.last.pt`。
+
+在统一预测客户端选择训练输出的 `.pt` 即可离线预测。新版只接收一张图，保留四查询热力图。原架构的 checkpoint 继续使用其保存的图像预处理和视角数。分发包仅包含客户端程序和运行资源，训练及预测权重单独提供。
+
+### 气候辅助监督
+
+SigLIP2 NMPZ 可用柯本–盖革五大类（A–E）监督池化后的图像特征。在 CLI 加上 `--climate-loss-weight 0.1` 可启用，默认值为 `0`。给对照组使用权重 `0` 并指定独立输出文件。气候标签来自经纬度对应的栅格像素，低于 `--climate-min-confidence`（默认 80%）或缺失的标签只参与地理定位损失。
+
+从 [Beck 等人的官方 NetCDF 归档](https://doi.org/10.6084/m9.figshare.21937568.v1) 提取 `1991_2020/koppen_geiger_0p01.nc`，保存到 `data/climate/beck2023_1991_2020/`，也可以用 `--climate-raster` 指定同一文件。该文件同时提供 `kg_class` 和 `kg_confidence`。训练日志会记录各类样本数和验证集气候指标，checkpoint 会记录栅格校验值及分类头，以便验证和续训。生成的 `.pt` 可由支持 SigLIP2 NMPZ 的推理代码直接加载。
+
 ## 环境专项微调：全图与底部梯形遮挡交替
 
 此功能从已有 S.V.G.T. 模型开始一个新的微调阶段，训练图片仍只接受 Mapillary。原图按 EXIF 调整方向后，将底部居中的梯形填为均值色 `(124,116,104)`，再按现有方式缩放、填充和归一化；原始图片文件保留。横图、竖图均按原图内容计算范围，填充边不计入遮挡比例。

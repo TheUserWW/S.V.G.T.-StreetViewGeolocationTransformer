@@ -1,0 +1,13 @@
+{
+  "vision_backbone": "siglip2_base_patch16_224",
+  "image_size": 224,
+  "patch_size": 16,
+  "n_embed": 768,
+  "n_head": 12,
+  "n_layer": 12,
+  "fusion_layers": 0,
+  "view_queries": 4,
+  "max_views": 1,
+  "geo_smoothing": 0.0,
+  "geo_smoothing_km": 250.0
+}

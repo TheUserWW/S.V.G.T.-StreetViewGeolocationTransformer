@@ -5,7 +5,7 @@ import json
 import math
 import random
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import torch
@@ -13,20 +13,24 @@ from torch.utils.data import DataLoader
 
 from streetgeo.core.checkpoints import (capture_rng_state, read_checkpoint, resolve_device,
                          restore_rng_state, save_checkpoint)
-from streetgeo.core.config import ModelConfig, TrainConfig
+from streetgeo.core.config import SIGLIP2_MODEL_PATH, ModelConfig, TrainConfig
 from streetgeo.datasets.images import StreetViewDataset, EnvironmentViewDataset, collate_streetviews
 from streetgeo.core.geography import haversine_km
 from streetgeo.core.model import StreetGeoModel
 from streetgeo.paths import validate_checkpoint_path
+from streetgeo.training.climate import (CLIMATE_CLASSES, DEFAULT_CLIMATE_RASTER, UNKNOWN_CLIMATE, assign_climates,
+                                        climate_logits, climate_loss, climate_metrics, climate_provenance,
+                                        update_confusion)
 from streetgeo.training.runtime import AlternatingBatchSampler, EpochBatchSampler, StopRequest, ignore_worker_interrupts, manifest_fingerprint
 from streetgeo.training.environment import parameter_groups, train_mode, resolve_recipe
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, stop_request=None, progress=None):
+def evaluate(model, loader, device, stop_request=None, progress=None, *, climate_head=None):
     was_training = model.training
     model.eval()
     errors, total_loss, count = [], 0.0, 0
+    confusion = torch.zeros(len(CLIMATE_CLASSES), len(CLIMATE_CLASSES), dtype=torch.long) if climate_head is not None else None
     total_batches = len(loader)
     started = time.monotonic()
     def report(batch):
@@ -39,7 +43,10 @@ def evaluate(model, loader, device, stop_request=None, progress=None):
             if stop_request is not None and stop_request.requested:
                 return None
             batch = {name: value.to(device) for name, value in batch.items() if name != "training_phase"}
+            climate_targets = batch.pop("climate_targets", None)
             output = model(**batch, top_k=1)
+            if confusion is not None:
+                update_confusion(confusion, climate_logits(climate_head, output.embedding), climate_targets)
             size = batch["images"].shape[0]
             count += size
             total_loss += output.loss.item() * size
@@ -53,28 +60,40 @@ def evaluate(model, loader, device, stop_request=None, progress=None):
             metrics[f"p{percentile}_km"] = torch.quantile(errors, percentile / 100).item()
         for radius in (1, 25, 100, 200, 750, 2500):
             metrics[f"within_{radius}km"] = (errors <= radius).double().mean().item()
+        if confusion is not None:
+            metrics["climate"] = climate_metrics(confusion)
         return metrics
     finally:
         model.train(was_training)
 
 
-def smoke_test(device):
+def smoke_test(device, config=None, weights=None):
     torch.manual_seed(1337)
-    cfg = ModelConfig(image_size=32, patch_size=8, n_embed=48, n_head=4,
-                      n_layer=2, fusion_layers=1, view_queries=2, cell_embed_dim=16,
-                      coarse_lat_bins=3, coarse_lon_bins=6, fine_bins=2)
-    model = StreetGeoModel(cfg).to(device)
-    images = torch.randn(2, 2, 3, 32, 32, device=device)
+    cfg = config or ModelConfig(image_size=32, patch_size=8, n_embed=48, n_head=4,
+                                n_layer=2, fusion_layers=1, view_queries=2, cell_embed_dim=16,
+                                coarse_lat_bins=3, coarse_lon_bins=6, fine_bins=2)
+    model = StreetGeoModel(cfg)
+    if weights is not None:
+        from streetgeo.training.siglip2 import load_pretrained_vision
+        load_pretrained_vision(model, weights)
+    model.to(device)
+    views = min(cfg.max_views, 2)
+    images = torch.randn(2, views, 3, cfg.image_size, cfg.image_size, device=device)
     targets = torch.tensor([[34.0522, -118.2437], [-33.8688, 151.2093]], device=device)
-    mask = torch.tensor([[True, False], [True, True]], device=device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    mask = torch.tensor([[True, False], [True, True]], device=device)[:, :views]
+    groups = model.parameters()
+    if cfg.is_siglip2:
+        groups = parameter_groups(model, unfreeze_last=0, learning_rate=3e-4,
+                                  visual_learning_rate=5e-6, weight_decay=0.1)
+        train_mode(model, 0)
+    optimizer = torch.optim.AdamW(groups, lr=3e-4)
     output = model(images, targets, view_mask=mask)
     output.loss.backward()
     gradients = [p.grad for p in model.parameters() if p.grad is not None]
     if not torch.isfinite(output.loss) or not all(torch.isfinite(g).all() for g in gradients):
         raise RuntimeError("nonfinite loss or gradient in smoke test")
     optimizer.step()
-    predictions = model.predict(images, view_mask=mask, top_k=2)
+    predictions = model.predict(images, view_mask=mask, top_k=min(2, cfg.total_cells))
     print(json.dumps({"smoke_test": "passed", "device": str(device),
                       "parameters": sum(p.numel() for p in model.parameters()),
                       "loss": output.loss.item(),
@@ -85,6 +104,8 @@ def _run_config(args, saved=None):
     defaults = TrainConfig()
     result = {}
     for name, default in (("environment_specialist", False), ("unfreeze_last", 2), ("visual_learning_rate", 5e-6),
+                          ("siglip2_unfreeze_last", 0), ("climate_loss_weight", 0.0),
+                          ("climate_min_confidence", 80.0),
                           ("road_mask_top_width", .20), ("road_mask_bottom_width", 1.), ("road_mask_height", .45)):
         supplied = getattr(args, name, None)
         result[name] = supplied if supplied is not None else (saved.get(name, default) if saved else default)
@@ -113,13 +134,36 @@ def _run_config(args, saved=None):
         raise ValueError("training hyperparameters must be finite")
     if result["unfreeze_last"] <= 0 or not math.isfinite(result["visual_learning_rate"]) or result["visual_learning_rate"] <= 0:
         raise ValueError("unfreeze-last and visual-learning-rate must be positive and finite")
+    if result["siglip2_unfreeze_last"] not in (0, 1, 2):
+        raise ValueError("siglip2-unfreeze-last must be 0, 1 or 2")
+    if not 0 <= result["climate_loss_weight"] <= 1 or not 0 <= result["climate_min_confidence"] <= 100:
+        raise ValueError("climate-loss-weight must be in [0, 1] and climate-min-confidence in [0, 100]")
     return result
+
+
+def _model_config(args, checkpoint):
+    supplied = getattr(args, "model_config", None)
+    config = ModelConfig(**checkpoint["model_config"]) if checkpoint else ModelConfig()
+    selected = ModelConfig(**json.loads(Path(supplied).read_text(encoding="utf-8"))) if supplied else config
+    overrides = {name: getattr(args, name, None) for name in ("geo_smoothing", "geo_smoothing_km")}
+    overrides = {name: value for name, value in overrides.items() if value is not None}
+    selected = replace(selected, **overrides) if overrides else selected
+    if getattr(args, "resume", None) and selected != config:
+        raise ValueError("--resume requires unchanged model config and geographic smoothing")
+    if checkpoint and replace(selected, geo_smoothing=config.geo_smoothing,
+                              geo_smoothing_km=config.geo_smoothing_km) != config:
+        raise ValueError("model-config is incompatible with checkpoint")
+    return selected
 
 
 def train(args):
     device = resolve_device(args.device)
+    siglip2_weights = getattr(args, "siglip2_weights", None)
     if args.smoke_test:
-        smoke_test(device)
+        if not args.model_config and (siglip2_weights or getattr(args, "geo_smoothing", None) is not None
+                                      or getattr(args, "geo_smoothing_km", None) is not None):
+            raise ValueError("Smoke testing SigLIP2 or geographic smoothing requires --model-config")
+        smoke_test(device, _model_config(args, None) if args.model_config else None, siglip2_weights)
         return
     dataset_roots = list(getattr(args, "dataset_root", []) or [])
     if getattr(args, "download", False) and (dataset_roots or args.resume or args.train_manifest or args.val_manifest):
@@ -128,6 +172,8 @@ def train(args):
         raise ValueError("原始数据目录与 --train-manifest/--val-manifest/--resume 分开使用；续训只需指定 --resume")
     if args.resume and args.init_from:
         raise ValueError("use either --resume or --init-from")
+    if siglip2_weights is not None and (args.resume or args.init_from):
+        raise ValueError("--siglip2-weights applies only to a fresh SigLIP2 NMPZ model")
     if args.save_every_steps <= 0 or args.save_every_seconds < 0 or args.num_workers < 0 or not math.isfinite(args.save_every_seconds):
         raise ValueError("save-every-steps must be positive; seconds/workers cannot be negative")
     if args.stop_after_steps is not None and args.stop_after_steps <= 0:
@@ -141,10 +187,38 @@ def train(args):
     run = _run_config(args, state["run_config"] if state else None)
     if run["environment_specialist"] and not (args.init_from or state):
         raise ValueError("环境专项微调需要 --init-from 指定已有模型，或使用 --resume 继续专项进度")
+    initial_checkpoint = read_checkpoint(args.init_from) if args.init_from else None
+    cfg = _model_config(args, checkpoint or initial_checkpoint)
+    if (siglip2_weights is not None or run["siglip2_unfreeze_last"]) and not cfg.is_siglip2:
+        raise ValueError("SigLIP2 training options require the SigLIP2 NMPZ model configuration")
+    if run["environment_specialist"] and run["siglip2_unfreeze_last"]:
+        raise ValueError("Use --unfreeze-last for environment-specialist fine-tuning")
+    visual_layers = run["unfreeze_last"] if run["environment_specialist"] else run["siglip2_unfreeze_last"]
+    if visual_layers > cfg.n_layer:
+        raise ValueError("unfreeze-last exceeds the checkpoint's number of visual layers")
+    if cfg.is_siglip2 and visual_layers and run["visual_learning_rate"] >= run["learning_rate"]:
+        raise ValueError("SigLIP2 visual learning rate must be below the localization learning rate")
+    climate_weight = run["climate_loss_weight"]
+    climate_dataset = None
+    if climate_weight:
+        if not cfg.is_siglip2:
+            raise ValueError("Climate supervision requires the SigLIP2 NMPZ model configuration")
+        saved_climate = state.get("climate") if state else None
+        if state and not saved_climate:
+            raise ValueError("Resume checkpoint is missing its climate head and data provenance")
+        raster = getattr(args, "climate_raster", None) or (
+            saved_climate["dataset"]["path"] if saved_climate else DEFAULT_CLIMATE_RASTER)
+        climate_dataset = climate_provenance(raster, run["climate_min_confidence"])
+        if saved_climate and any(climate_dataset[key] != saved_climate["dataset"][key]
+                                 for key in ("recipe", "sha256", "minimum_confidence")):
+            raise ValueError("Climate raster or label recipe changed since checkpoint")
     recipe, road_mask, legacy_mask = resolve_recipe(run, state if run["environment_specialist"] else None,
                                                    explicit_geometry=any(getattr(args, name, None) is not None for name in
                                                    ("road_mask_top_width", "road_mask_bottom_width", "road_mask_height")))
-    output_path = validate_checkpoint_path(args.output or (state["output_path"] if state else TrainConfig().model_path)).resolve()
+    default_output = SIGLIP2_MODEL_PATH if cfg.is_siglip2 else TrainConfig().model_path
+    if climate_weight:
+        default_output = str(Path(default_output).with_name("climate.pt"))
+    output_path = validate_checkpoint_path(args.output or (state["output_path"] if state else default_output)).resolve()
     last_path = output_path.with_name(output_path.stem + ".last" + output_path.suffix)
     if not state and (last_path.exists() or output_path.exists()):
         raise FileExistsError(f"Training output already exists. Use --resume {last_path}, or choose a new --output")
@@ -181,30 +255,22 @@ def train(args):
     val_fingerprint = manifest_fingerprint(val_manifest) if val_manifest else None
     if state and (fingerprint != state["train_fingerprint"] or val_fingerprint != state["val_fingerprint"]):
         raise ValueError("Manifests changed since checkpoint; resume would change the data order. Use --init-from")
-    initial_checkpoint = read_checkpoint(args.init_from) if args.init_from else None
-    if checkpoint:
-        cfg = ModelConfig(**checkpoint["model_config"])
-    elif initial_checkpoint:
-        cfg = ModelConfig(**initial_checkpoint["model_config"])
-    else:
-        cfg = ModelConfig()
-    if args.model_config:
-        supplied_config = ModelConfig(**json.loads(Path(args.model_config).read_text(encoding="utf-8")))
-        if (checkpoint or args.init_from) and asdict(supplied_config) != asdict(cfg):
-            raise ValueError("model-config is incompatible with checkpoint")
-        cfg = supplied_config
-    if run["environment_specialist"] and run["unfreeze_last"] > cfg.n_layer:
-        raise ValueError("unfreeze-last exceeds the checkpoint's number of visual layers")
     train_data = StreetViewDataset(train_manifest, cfg, mapillary_only=True,
                                   environment_specialist=run["environment_specialist"], road_mask=road_mask,
                                   legacy_environment_mask=legacy_mask)
+    climate_train_counts = assign_climates(train_data, climate_dataset) if climate_dataset else None
+    if climate_train_counts and sum(climate_train_counts[name] > 0 for name in CLIMATE_CLASSES) < 2:
+        raise ValueError("Climate supervision needs valid training labels from at least two major climate classes")
     loader_options = {"num_workers": args.num_workers, "collate_fn": collate_streetviews,
                       "pin_memory": device.type == "cuda", "worker_init_fn": ignore_worker_interrupts}
     val_loader = environment_loader = None
+    climate_val_counts = None
     if val_manifest:
         val_data = StreetViewDataset(val_manifest, cfg, mapillary_only=True,
                                     environment_specialist=run["environment_specialist"], road_mask=road_mask,
                                     legacy_environment_mask=legacy_mask)
+        if climate_dataset:
+            climate_val_counts = assign_climates(val_data, climate_dataset)
         if run["environment_specialist"]:
             train_ids = {paths[0].stem for paths, _, _ in train_data.samples}
             if any(paths[0].stem in train_ids for paths, _, _ in val_data.samples):
@@ -218,17 +284,34 @@ def train(args):
     print(json.dumps({"event": "training_dataset", "scope": "world", "samples": len(train_data),
                       "sources": train_data.source_counts, "bounds": train_data.geographic_bounds,
                       "validation_samples": len(val_loader.dataset) if val_loader else 0}, ensure_ascii=False), flush=True)
-    model = StreetGeoModel(cfg).to(device)
+    if climate_dataset:
+        print(json.dumps({"event": "climate_labels", "train": climate_train_counts, "validation": climate_val_counts,
+                          "minimum_confidence": climate_dataset["minimum_confidence"]}), flush=True)
+    model = StreetGeoModel(cfg)
     if checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     elif initial_checkpoint:
         model.load_state_dict(initial_checkpoint["model_state_dict"])
-    del initial_checkpoint
+    elif cfg.is_siglip2:
+        from streetgeo.training.siglip2 import load_pretrained_vision
+        print("正在导入 SigLIP2 预训练视觉权重…", flush=True)
+        load_pretrained_vision(model, siglip2_weights)
+    del checkpoint, initial_checkpoint
+    model.to(device)
     groups = model.parameters()
-    if run["environment_specialist"]:
-        groups = parameter_groups(model, unfreeze_last=run["unfreeze_last"], learning_rate=run["learning_rate"],
+    if run["environment_specialist"] or cfg.is_siglip2:
+        groups = parameter_groups(model, unfreeze_last=visual_layers, learning_rate=run["learning_rate"],
                                   visual_learning_rate=run["visual_learning_rate"], weight_decay=run["weight_decay"])
+    climate_head = None
+    if climate_dataset:
+        # Auxiliary initialization must not shift the geolocation run's RNG.
+        with torch.random.fork_rng(devices=[]):
+            climate_head = torch.nn.Linear(cfg.n_embed, len(CLIMATE_CLASSES)).to(device)
+        if saved_climate:
+            climate_head.load_state_dict(saved_climate["head"])
+        groups[-1]["params"].extend(climate_head.parameters())
     optimizer = torch.optim.AdamW(groups, lr=run["learning_rate"], weight_decay=run["weight_decay"])
+    optimized_parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]]
     amp_mode = run["amp"]
     if amp_mode == "auto":
         amp_mode = ("bf16" if torch.cuda.is_bf16_supported() else "fp16") if device.type == "cuda" else "off"
@@ -256,6 +339,12 @@ def train(args):
         restore_rng_state(state["rng"])
     last_saved_at, started_step = time.monotonic(), step
 
+    def climate_state():
+        if climate_head is None:
+            return {}
+        return {"climate": {"dataset": climate_dataset, "head": climate_head.state_dict(),
+                            "train_counts": climate_train_counts, "validation_counts": climate_val_counts}}
+
     def save_progress(reason):
         nonlocal last_saved_at
         print(json.dumps({"event": "training_phase", "phase": "saving", "reason": reason}), flush=True)
@@ -271,6 +360,7 @@ def train(args):
             "train_manifest": str(Path(train_manifest).resolve()), "train_fingerprint": fingerprint,
             "val_manifest": str(Path(val_manifest).resolve()) if val_manifest else None,
             "val_fingerprint": val_fingerprint, "output_path": str(output_path), "reason": reason,
+            **climate_state(),
         })
         last_saved_at = time.monotonic()
         print(json.dumps({"checkpoint": str(last_path), "step": step, "reason": reason}), flush=True)
@@ -281,7 +371,9 @@ def train(args):
                       "source_batches_per_epoch": source_batches_per_epoch,
                       "environment_specialist": run["environment_specialist"],
                       "environment_recipe": recipe if run["environment_specialist"] else None,
-                      "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
+                      "vision_backbone": cfg.vision_backbone, "geo_smoothing": cfg.geo_smoothing,
+                      "trainable_parameters": sum(p.numel() for p in optimized_parameters if p.requires_grad),
+                      "climate_loss_weight": climate_weight,
                       "step": step, "epoch": epoch + 1, "output": str(output_path),
                       "resume_checkpoint": str(last_path)}), flush=True)
     if state:
@@ -295,6 +387,7 @@ def train(args):
                 return
             def validation_pass(loader, view, *, baseline=False):
                 return evaluate(model, loader, device, stop_request=stop,
+                                climate_head=climate_head,
                                 progress=lambda details: print(json.dumps({"event": "validation_progress",
                                     "epoch": epoch + 1, "validation_view": view, "baseline": baseline,
                                     **details}), flush=True))
@@ -310,14 +403,15 @@ def train(args):
                 best_metric = baseline_full["median_km"]
                 save_checkpoint(model, output_path, training_state={"global_step": step, "dataset_source": "Mapillary",
                                 "run_config": run, "baseline_metrics": baseline_metrics, "environment_recipe": recipe,
-                                "metrics": {"validation": baseline_full, "environment_validation": baseline_environment}})
+                                "metrics": {"validation": baseline_full, "environment_validation": baseline_environment},
+                                **climate_state()})
                 save_progress("baseline_complete")
             while epoch < run["epochs"]:
                 if stop.requested:
                     save_progress("graceful_stop")
                     return
-                if run["environment_specialist"]:
-                    train_mode(model, run["unfreeze_last"])
+                if run["environment_specialist"] or cfg.is_siglip2:
+                    train_mode(model, visual_layers)
                 else:
                     model.train()
                 if next_batch < batches_per_epoch:
@@ -340,25 +434,30 @@ def train(args):
                     for group in optimizer.param_groups:
                         group["lr"] = group.get("base_learning_rate", run["learning_rate"]) * factor
                     batch = {name: value.to(device, non_blocking=True) for name, value in batch.items()}
+                    climate_targets = batch.pop("climate_targets", None)
                     optimizer.zero_grad(set_to_none=True)
                     with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_mode != "off"):
                         result = model(**batch, top_k=1)
-                    if not torch.isfinite(result.loss):
+                        loss = result.loss
+                        if climate_head is not None and climate_targets.ne(UNKNOWN_CLIMATE).any():
+                            logits = climate_logits(climate_head, result.embedding)
+                            loss = loss + climate_weight * climate_loss(logits, climate_targets)
+                    if not torch.isfinite(loss):
                         raise RuntimeError(f"nonfinite loss at step {step}")
-                    scaler.scale(result.loss).backward()
+                    scaler.scale(loss).backward()
                     scaler.unscale_(optimizer)
                     # FP16 overflow is handled by GradScaler's skipped step and
                     # scale reduction. FP32/BF16 nonfinite gradients are errors.
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), run["grad_clip"],
+                    torch.nn.utils.clip_grad_norm_(optimized_parameters, run["grad_clip"],
                                                    error_if_nonfinite=amp_mode != "fp16")
                     scaler.step(optimizer)
                     scaler.update()
-                    epoch_loss += result.loss.item() * batch["images"].shape[0]
+                    epoch_loss += loss.item() * batch["images"].shape[0]
                     epoch_examples += batch["images"].shape[0]
                     step += 1
                     next_batch += 1
                     if step % args.log_every_steps == 0:
-                        print(json.dumps({"epoch": epoch + 1, "step": step, "loss": result.loss.item(),
+                        print(json.dumps({"epoch": epoch + 1, "step": step, "loss": loss.item(),
                                           "input_view": phase,
                                           "total_steps": total_steps, "batch": next_batch,
                                           "learning_rate": optimizer.param_groups[-1]["lr"],
@@ -389,7 +488,8 @@ def train(args):
                     print(json.dumps({"event": "training_phase", "phase": "saving", "reason": "best_model"}), flush=True)
                     save_checkpoint(model, output_path, training_state={"metrics": metrics, "global_step": step,
                                     "dataset_source": "Mapillary", "run_config": run, "baseline_metrics": baseline_metrics,
-                                    "environment_recipe": recipe if run["environment_specialist"] else None})
+                                    "environment_recipe": recipe if run["environment_specialist"] else None,
+                                    **climate_state()})
                 epoch += 1
                 next_batch, epoch_loss, epoch_examples = 0, 0.0, 0
                 save_progress("epoch_end")
@@ -414,6 +514,14 @@ def main():
     parser.add_argument("--model-config")
     parser.add_argument("--resume", help="full *.last.pt checkpoint; continue the same run")
     parser.add_argument("--init-from", help="model weights for a NEW training stage")
+    parser.add_argument("--siglip2-weights", type=Path, help="official model.safetensors file for offline initialization")
+    parser.add_argument("--siglip2-unfreeze-last", type=int, choices=(0, 1, 2),
+                        help="number of terminal SigLIP2 blocks to tune; default 0 (frozen)")
+    parser.add_argument("--geo-smoothing", type=float, help="geographic soft-target weight [0, 0.5]")
+    parser.add_argument("--geo-smoothing-km", type=float, help="distance-decay scale in kilometers")
+    parser.add_argument("--climate-loss-weight", type=float, help="optional SigLIP2 climate auxiliary loss weight; default 0")
+    parser.add_argument("--climate-raster", type=Path, help="Beck 2023 1991–2020 Köppen–Geiger NetCDF")
+    parser.add_argument("--climate-min-confidence", type=float, help="minimum raster confidence percent; default 80")
     parser.add_argument("--environment-specialist", action=argparse.BooleanOptionalAction, default=None,
                         help="fine-tune existing weights with full/masked alternating updates; requires validation")
     parser.add_argument("--unfreeze-last", type=int, help="last visual layers to unfreeze for environment fine-tuning; default 2")

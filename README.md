@@ -1,8 +1,8 @@
 # Street-View Geolocation Transformer (S.V.G.T.)
 
-[Try it on Hugging Face / Model weights](https://huggingface.co/TheUserWW/S.V.G.T.-StreetViewGeolocationTransformer)
+[Model weights and Gradio demo on Hugging Face](https://huggingface.co/TheUserWW/S.V.G.T.-StreetViewGeolocationTransformer)
 
-**Street-View Geolocation Transformer (S.V.G.T.)** estimates geographic coordinates from street-view images. The model accepts a single perspective image or up to four views of the same location. It returns latitude and longitude, such as `34.052200, -118.243700`, along with ranked geographic candidates.
+**Street-View Geolocation Transformer (S.V.G.T.)** estimates geographic coordinates from street-view images. The SigLIP2 NMPZ preset takes one fixed perspective image. The original presets accept up to four views of the same location. It returns latitude and longitude, such as `34.052200, -118.243700`, along with ranked geographic candidates.
 
 This repository provides the PyTorch model, Mapillary data tools, and command-line training and resume interfaces. Model weights and datasets are distributed separately from the source files.
 
@@ -15,10 +15,28 @@ This repository provides the PyTorch model, Mapillary data tools, and command-li
 | --- | ---: | ---: | ---: |
 | [Default 400M](configs/streetgeo_400m.json) | 397,937,418 | 1.48 GiB | 32 default |
 | [Legacy 135M](configs/streetgeo_514m.json) | 134,686,730 | 514 MiB | 64 suggested |
+| [SigLIP2 NMPZ](configs/streetgeo_siglip2_nmpz.json) | 103,376,138 | 394 MiB | 8 suggested |
 
-Both presets use `224×224` inputs and support BF16 training on CUDA. The default architecture uses width 1024, 16 attention heads, 28 visual layers, and 2 fusion layers. Use `--model-config` for a new run with a custom configuration. Checkpoints carry their saved architecture. Start a separate run when changing model dimensions.
+All presets use `224×224` inputs and support BF16 training on CUDA. The default architecture uses width 1024, 16 attention heads, 28 visual layers, and 2 fusion layers. Use `--model-config` for a new run with a custom configuration. Checkpoints carry their saved architecture. Start a separate run when changing model dimensions.
 
-## Architecture
+## SigLIP2 NMPZ
+
+The single-view encoder starts from Google's pretrained SigLIP2 Base/16/224. Four learned queries pool patch features from the same frame before the hierarchical geographic classifier and within-cell offset head. Training freezes the vision blocks by default. Optional great-circle label smoothing and terminal-block fine-tuning are available from the CLI. See the [upstream backbone](https://huggingface.co/google/siglip2-base-patch16-224) and [NMPZ training guide](docs/training/mapillary.md#siglip2-nmpz-单图训练).
+
+### Climate auxiliary experiment
+
+Enable the five-class Köppen–Geiger auxiliary objective with `--climate-loss-weight 0.1`. Raster labels below 80% confidence or with missing data only contribute to the geolocation loss. The auxiliary head is used for training and evaluation. The released checkpoints predict locations through the geographic head.
+
+| Climate loss weight | Top-1 median ↓ | P90 distance ↓ | Within 25 km ↑ | True cell in Top 5 ↑ |
+| --- | ---: | ---: | ---: | ---: |
+| `0` | 949 km | 3,501 km | 3.64% | 30.55% |
+| `0.1` | 1,178 km | 3,602 km | 3.64% | 25.82% |
+
+The two validation-selected checkpoints were evaluated on the same 275 held-out Mapillary images from North and Central America. Both runs used a frozen SigLIP2 encoder, four epochs, seed 1337, and hard geographic labels. At the matched final step (1,100), median distance was 926 km for `0` and 969 km for `0.1`. This is a single regional split with one training seed. The test set had valid climate labels for A, C, and D. The climate loss defaults to `0`.
+
+The [Hugging Face model card](https://huggingface.co/TheUserWW/S.V.G.T.-StreetViewGeolocationTransformer) links to the SigLIP2 NMPZ checkpoint and both climate experiment checkpoints.
+
+## Original visual architecture
 
 ```mermaid
 flowchart TD
@@ -86,7 +104,7 @@ Download targets include already saved images. SQLite retains image IDs, paginat
 
 The importer creates frozen `train.jsonl`, `val.jsonl`, `test.jsonl`, and a split report. It groups samples by sequence and geographic block and excludes nearby cross-split samples. Each training and validation record must have `source: Mapillary`, a numeric string `mapillary_id`, and a matching image filename. Prepare into a new output directory when you add images during an active run.
 
-Preprocessing applies EXIF orientation, RGB conversion, aspect-preserving resize with padding, and normalization. The pipeline preserves left-right cues such as driving side and text. Validation reports geographic distance errors. The best checkpoint is selected by median validation error when a validation set is supplied and by training loss otherwise.
+Preprocessing applies EXIF orientation, RGB conversion, and checkpoint-specific resizing and normalization. The original architecture pads to a square. SigLIP2 NMPZ resizes the full image to 224×224. The pipeline preserves left-right cues such as driving side and text. Validation reports geographic distance errors. The best checkpoint is selected by median validation error when a validation set is supplied and by training loss otherwise.
 
 ### Checkpoints and resume
 

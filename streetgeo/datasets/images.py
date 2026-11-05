@@ -8,13 +8,20 @@ import torch
 from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 
-from streetgeo.core.config import ModelConfig
+from streetgeo.core.config import SIGLIP2_PREPROCESSING, ModelConfig
 from streetgeo.datasets.policy import require_mapillary_row
 from streetgeo.datasets.road_mask import RoadMask, MASK_FILL
 
 IMAGE_MEAN = (0.485, 0.456, 0.406)
 IMAGE_STD = (0.229, 0.224, 0.225)
 IMAGE_FILL = MASK_FILL
+SIGLIP2_MEAN_STD = (0.5, 0.5, 0.5)
+
+
+def image_statistics(preprocessing):
+    if preprocessing == SIGLIP2_PREPROCESSING:
+        return SIGLIP2_MEAN_STD, SIGLIP2_MEAN_STD
+    return IMAGE_MEAN, IMAGE_STD
 
 
 def manifest_lines(path):
@@ -24,11 +31,14 @@ def manifest_lines(path):
 
 
 def load_image(path, image_size=224, *, road_mask=None, mask_bottom_third=False):
-    """RGB, EXIF orientation, aspect-preserving letterbox, then normalization.
+    """RGB and EXIF orientation, then the checkpoint's resize and normalization.
 
     Avoid random horizontal flips: they can reverse driving-side/sign clues.
     Training and inference always use exactly the same preprocessing.
     """
+    preprocessing = None
+    if isinstance(image_size, ModelConfig):
+        preprocessing, image_size = image_size.preprocessing, image_size.image_size
     with Image.open(path) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
         if road_mask is not None and mask_bottom_third:
@@ -38,12 +48,16 @@ def load_image(path, image_size=224, *, road_mask=None, mask_bottom_third=False)
         if mask_bottom_third:
             # Retained only to resume checkpoints created with recipe version 1.
             image.paste(IMAGE_FILL, (0, image.height * 2 // 3, image.width, image.height))
-        image = ImageOps.pad(image, (image_size, image_size),
-                             method=Image.Resampling.BICUBIC, color=IMAGE_FILL)
+        if preprocessing == SIGLIP2_PREPROCESSING:
+            image = image.resize((image_size, image_size), resample=Image.Resampling.BILINEAR)
+        else:
+            image = ImageOps.pad(image, (image_size, image_size),
+                                 method=Image.Resampling.BICUBIC, color=IMAGE_FILL)
         pixels = torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
     pixels = pixels.reshape(image_size, image_size, 3).permute(2, 0, 1).float() / 255
-    mean = pixels.new_tensor(IMAGE_MEAN).view(3, 1, 1)
-    std = pixels.new_tensor(IMAGE_STD).view(3, 1, 1)
+    mean, std = image_statistics(preprocessing)
+    mean = pixels.new_tensor(mean).view(3, 1, 1)
+    std = pixels.new_tensor(std).view(3, 1, 1)
     return (pixels - mean) / std
 
 
@@ -65,6 +79,7 @@ class StreetViewDataset(Dataset):
         self.legacy_environment_mask = legacy_environment_mask
         manifest = Path(manifest_path).resolve()
         self.samples = []
+        self.climate_targets = None
         self.source_counts = {}
         self.geographic_bounds = {"south": 90.0, "north": -90.0, "west": 180.0, "east": -180.0}
         for line_number, line in manifest_lines(manifest):
@@ -123,7 +138,7 @@ class StreetViewDataset(Dataset):
         # a dataset created before these shape attributes existed.
         legacy = getattr(self, "legacy_environment_mask", True)
         sample = {
-            "images": torch.stack([load_image(path, self.config.image_size,
+            "images": torch.stack([load_image(path, self.config,
                                   road_mask=self.road_mask if phase == 1 and not legacy else None,
                                   mask_bottom_third=phase == 1 and legacy) for path in paths]),
             "coordinates": torch.tensor(coordinates, dtype=torch.float32),
@@ -131,6 +146,9 @@ class StreetViewDataset(Dataset):
         }
         if phase is not None:
             sample["training_phase"] = phase
+        climate_targets = getattr(self, "climate_targets", None)
+        if climate_targets is not None:
+            sample["climate_target"] = climate_targets[index]
         return sample
 
 
@@ -163,6 +181,8 @@ def collate_streetviews(samples):
         headings[index, :count] = sample["headings"]
     result = {"images": images, "view_mask": mask, "headings": headings,
               "targets": torch.stack([sample["coordinates"] for sample in samples])}
+    if "climate_target" in samples[0]:
+        result["climate_targets"] = torch.tensor([sample["climate_target"] for sample in samples], dtype=torch.long)
     phases = {sample.get("training_phase") for sample in samples}
     if len(phases) != 1:
         raise ValueError("a batch must contain exactly one training phase")

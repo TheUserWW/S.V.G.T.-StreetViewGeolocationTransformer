@@ -1,6 +1,18 @@
 """Configuration shared by training, inference and saved checkpoints."""
 
 from dataclasses import dataclass
+import math
+
+
+LEGACY_BACKBONE = "svgt_vit"
+SIGLIP2_BACKBONE = "siglip2_base_patch16_224"
+SIGLIP2_REPO = "google/siglip2-base-patch16-224"
+SIGLIP2_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
+LEGACY_PREPROCESSING = "svgt_letterbox_v1"
+SIGLIP2_PREPROCESSING = "siglip2_resize_v1"
+SIGLIP2_CONFIG_PATH = "configs/streetgeo_siglip2_nmpz.json"
+SIGLIP2_MODEL_PATH = "checkpoints/streetgeo_siglip2_nmpz/best.pt"
+SIGLIP2_WEIGHTS_PATH = "checkpoints/pretrained/siglip2-base-patch16-224/model.safetensors"
 
 
 @dataclass
@@ -21,11 +33,16 @@ class ModelConfig:
     cell_embed_dim: int = 128
     offset_loss_weight: float = 1.0
     spherical_loss_weight: float = 1.0
+    vision_backbone: str = LEGACY_BACKBONE
+    backbone_revision: str | None = None
+    preprocessing: str | None = None
+    geo_smoothing: float = 0.0
+    geo_smoothing_km: float = 250.0
 
     def __post_init__(self):
         integer_fields = (
             "image_size", "patch_size", "n_embed", "n_head", "n_layer",
-            "fusion_layers", "view_queries", "max_views", "mlp_ratio",
+            "view_queries", "max_views", "mlp_ratio",
             "coarse_lat_bins", "coarse_lon_bins", "fine_bins", "cell_embed_dim",
         )
         for name in integer_fields:
@@ -40,6 +57,34 @@ class ModelConfig:
             raise ValueError("dropout must be in [0, 1)")
         if self.offset_loss_weight < 0 or self.spherical_loss_weight < 0:
             raise ValueError("loss weights cannot be negative")
+        if not 0 <= self.geo_smoothing <= 0.5:
+            raise ValueError("geo_smoothing must be in [0, 0.5]")
+        if not math.isfinite(self.geo_smoothing_km) or self.geo_smoothing_km <= 0:
+            raise ValueError("geo_smoothing_km must be positive and finite")
+        if type(self.fusion_layers) is not int:
+            raise ValueError("fusion_layers must be an integer")
+        if self.vision_backbone == SIGLIP2_BACKBONE:
+            shape = (self.image_size, self.patch_size, self.n_embed, self.n_head, self.n_layer,
+                     self.fusion_layers, self.view_queries, self.max_views, self.mlp_ratio)
+            if shape != (224, 16, 768, 12, 12, 0, 4, 1, 4):
+                raise ValueError("SigLIP2 NMPZ requires Base/16/224, four queries and one view without fusion")
+            if self.backbone_revision not in (None, SIGLIP2_REVISION):
+                raise ValueError("Unsupported SigLIP2 backbone revision")
+            self.backbone_revision = SIGLIP2_REVISION
+            expected_preprocessing = SIGLIP2_PREPROCESSING
+        elif self.vision_backbone == LEGACY_BACKBONE:
+            if self.fusion_layers <= 0 or self.backbone_revision is not None:
+                raise ValueError("The original visual encoder requires fusion layers and no backbone revision")
+            expected_preprocessing = LEGACY_PREPROCESSING
+        else:
+            raise ValueError(f"Unsupported vision backbone: {self.vision_backbone}")
+        if self.preprocessing not in (None, expected_preprocessing):
+            raise ValueError("Preprocessing does not match the vision backbone")
+        self.preprocessing = expected_preprocessing
+
+    @property
+    def is_siglip2(self):
+        return self.vision_backbone == SIGLIP2_BACKBONE
 
     @property
     def coarse_cells(self):
