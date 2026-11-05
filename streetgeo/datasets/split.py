@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 
 from shapely.geometry import Point, box
 from shapely.strtree import STRtree
@@ -85,15 +84,8 @@ def create_splits(rows, *, seed=1337, block_degrees=0.25, guard_m=250, ratios=(0
             if key in identities:
                 union(index, identities[key])
             identities[key] = index
-    # A place gets ONE spatial anchor. Otherwise historical GPS jitter across
-    # grid edges can transitively merge an entire dense GSV city into one group.
-    initial_groups = [find(index) for index in range(len(rows))]
-    anchors = {}
     for index, row in enumerate(rows):
-        if row.get("group_id") and str(row.get("source", "")).lower() == "gsv-cities":
-            anchors.setdefault(initial_groups[index], (row["latitude"], row["longitude"]))
-    for index, row in enumerate(rows):
-        latitude, longitude = anchors.get(initial_groups[index], (row["latitude"], row["longitude"]))
+        latitude, longitude = row["latitude"], row["longitude"]
         block = (math.floor(longitude / block_degrees), math.floor(latitude / block_degrees))
         if block in blocks:
             union(index, blocks[block])
@@ -147,41 +139,18 @@ def create_splits(rows, *, seed=1337, block_degrees=0.25, guard_m=250, ratios=(0
 
 
 def prepare(manifest, *, output_dir=None, seed=1337, block_degrees=0.25, guard_m=250):
-    manifest = Path(manifest).resolve()
-    content = manifest.read_bytes()
-    rows = [json.loads(line) for line in content.decode("utf-8").splitlines() if line.strip()]
-    for row in rows:
-        lat, lon = row["latitude"], row["longitude"]
-        if not math.isfinite(lat) or not math.isfinite(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
-            raise ValueError("manifest contains invalid coordinates")
-    splits, report = create_splits(rows, seed=seed, block_degrees=block_degrees, guard_m=guard_m)
-    output = Path(output_dir).resolve() if output_dir else manifest.parent
-    output.mkdir(parents=True, exist_ok=True)
-    for name, records in splits.items():
-        path = output / f"{name}.jsonl"
-        temporary = path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-            for row in records:
-                row = dict(row)
-                if "image" in row:
-                    row["image"] = os.path.relpath(manifest.parent / row["image"], output).replace("\\", "/")
-                if "images" in row:
-                    row["images"] = [os.path.relpath(manifest.parent / path, output).replace("\\", "/") for path in row["images"]]
-                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-        os.replace(temporary, path)
-    report["source_sha256"] = hashlib.sha256(content).hexdigest()
-    report_path = output / "split_report.json"
-    temporary = report_path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    os.replace(temporary, report_path)
-    print(json.dumps(report, indent=2))
+    from streetgeo.datasets.prepare import prepare_manifest
+
+    report = prepare_manifest(manifest, output_dir=output_dir, seed=seed,
+                              block_degrees=block_degrees, guard_m=guard_m)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
     return report
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", default="data/mapillary_us/all.jsonl")
-    parser.add_argument("--output-dir")
+    parser.add_argument("--manifest", default="data/mapillary/all.jsonl")
+    parser.add_argument("--output-dir", help="frozen split directory; default <manifest directory>/splits")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--block-degrees", type=float, default=0.25)
     parser.add_argument("--guard-m", type=float, default=250)

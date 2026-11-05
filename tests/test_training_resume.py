@@ -118,7 +118,7 @@ class ResumeTests(unittest.TestCase):
             for index in range(6):
                 Image.new("RGB", (40, 32), (index * 35, 120, 200 - index * 20)).save(folder / f"{index}.png")
                 rows.append({"image": f"{index}.png", "latitude": 25 + index * 5,
-                             "longitude": -120 + index * 7, "source": "OpenStreetView-5M", "osv5m_id": str(index)})
+                             "longitude": -120 + index * 7, "source": "Mapillary", "mapillary_id": str(index)})
             manifest = folder / "train.jsonl"
             manifest.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
             cfg = folder / "model.json"

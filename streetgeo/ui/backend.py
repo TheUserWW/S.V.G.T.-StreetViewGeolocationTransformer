@@ -13,26 +13,33 @@ import threading
 import uuid
 
 from streetgeo.paths import ROOT, validate_checkpoint_path
-DATA_SOURCES = ("OpenStreetView-5M（部分图片可用）",)
+DATA_SOURCES = ("Mapillary（API 街景）",)
 MODEL_PRESETS = {
     "1.35 亿参数（原版 · 514 MiB）": {
-        "config": "configs/streetgeo_514m.json", "batch_size": "64", "directory": "streetgeo_514m_osv",
+        "config": "configs/streetgeo_514m.json", "batch_size": "64", "directory": "streetgeo_514m_mapillary",
     },
     "3.98 亿参数（新版 · 1.48 GiB）": {
-        "config": "configs/streetgeo_400m.json", "batch_size": "32", "directory": "streetgeo_400m_osv",
+        "config": "configs/streetgeo_400m.json", "batch_size": "32", "directory": "streetgeo_400m_mapillary",
     },
 }
 CUSTOM_MODEL_PRESET = "自定义 JSON 配置"
 DEFAULT_MODEL_PRESET = "3.98 亿参数（新版 · 1.48 GiB）"
 DEFAULTS = {
-    "split_output": "data/world_osv_514m", "data_source": DATA_SOURCES[0],
-    "osv_root": "data/OpenStreetView-5M", "block_degrees": "0.02", "guard_m": "250",
-    "train_manifest": "data/world_osv_514m/train.jsonl", "val_manifest": "data/world_osv_514m/val.jsonl",
-    "output": "checkpoints/streetgeo_400m_osv/best.pt", "resume": "checkpoints/streetgeo_400m_osv/best.last.pt",
+    "sidebar_width": "196",
+    "split_output": "data/world_mapillary", "data_source": DATA_SOURCES[0],
+    "mapillary_root": "data/mapillary", "block_degrees": "0.02", "guard_m": "250",
+    "train_manifest": "data/world_mapillary/train.jsonl", "val_manifest": "data/world_mapillary/val.jsonl",
+    "output": "checkpoints/streetgeo_400m_mapillary/best.pt", "resume": "checkpoints/streetgeo_400m_mapillary/best.last.pt",
     "mode": "新建训练", "epochs": "4", "batch_size": "32", "num_workers": "4",
     "device": "cuda", "amp": "bf16", "learning_rate": "0.0003", "warmup_steps": "1000",
     "save_every_steps": "500", "save_every_seconds": "300", "model_config": "configs/streetgeo_400m.json", "init_from": "",
     "model_preset": DEFAULT_MODEL_PRESET,
+    "download_continents": "", "download_countries": "USA", "download_regions": "",
+    "download_geojson": "", "download_bbox": "", "max_images": "10000", "max_pages": "2000",
+    "max_gb": "20", "min_free_gb": "5", "workers": "4", "requests_per_second": "2",
+    "resolution": "1024",
+    "environment_specialist": "关闭", "unfreeze_last": "2", "visual_learning_rate": "0.000005",
+    "road_mask_top_width": "20", "road_mask_bottom_width": "100", "road_mask_height": "45",
 }
 
 
@@ -55,7 +62,7 @@ def model_preset_for_config(value):
 
 def new_model_output(model_config, filename="best.pt"):
     preset = MODEL_PRESETS.get(model_preset_for_config(model_config), {})
-    directory = ROOT / "checkpoints" / preset.get("directory", "streetgeo_custom_osv")
+    directory = ROOT / "checkpoints" / preset.get("directory", "streetgeo_custom_mapillary")
     candidate = directory / filename
     suffix = 2
     while candidate.exists() or candidate.with_name(candidate.stem + ".last" + candidate.suffix).exists():
@@ -70,6 +77,9 @@ def load_settings(path):
         saved = json.loads(Path(path).read_text(encoding="utf-8"))
         if isinstance(saved, dict):
             result.update({key: str(value) for key, value in saved.items() if key in DEFAULTS})
+            if saved.get("data_source") != DATA_SOURCES[0]:
+                for key in ("split_output", "train_manifest", "val_manifest", "output", "resume", "mode", "init_from"):
+                    result[key] = DEFAULTS[key]
     except (OSError, ValueError, TypeError):
         pass
     result["data_source"] = DATA_SOURCES[0]
@@ -103,12 +113,46 @@ def input_file(value, label):
     return str(resolve_path(value))
 
 
+def build_download(values, stop_file=None):
+    from streetgeo.datasets.regions import parse_codes, validate_selection
+    continents = sorted(set(part.strip().lower() for part in values["download_continents"].split(",") if part.strip()))
+    countries, regions = parse_codes(values["download_countries"]), parse_codes(values["download_regions"])
+    validate_selection(continents, countries, regions)
+    if not any((continents, countries, regions, values["download_geojson"].strip(), values["download_bbox"].strip())):
+        raise ValueError("请选择至少一个大洲、国家/地区或自定义区域")
+    if not values["mapillary_root"].strip():
+        raise ValueError("请选择 Mapillary 下载目录")
+    arguments = ["--output", str(resolve_path(values["mapillary_root"])), "--resolution", values["resolution"]]
+    if values["resolution"] not in ("256", "1024", "2048"):
+        raise ValueError("请选择有效的图片分辨率")
+    for flag, selected in (("continents", continents), ("countries", countries), ("regions", regions)):
+        if selected:
+            arguments += ["--" + flag, ",".join(selected)]
+    if values["download_geojson"].strip():
+        arguments += ["--geojson", input_file(values["download_geojson"], "区域 GeoJSON")]
+    if values["download_bbox"].strip():
+        try:
+            west, south, east, north = map(float, values["download_bbox"].replace(",", " ").split())
+        except (ValueError, TypeError):
+            raise ValueError("区域范围需填写：西经度 南纬度 东经度 北纬度") from None
+        if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+            raise ValueError("区域经纬度无效；跨日期变更线的区域请分两次下载")
+        arguments += ["--bbox", *map(str, (west, south, east, north))]
+    for key, title in (("max_images", "下载目标张数"), ("max_pages", "每次查询页数"), ("workers", "下载并发数")):
+        arguments += ["--" + key.replace("_", "-"), str(number(values, key, title, integer=True, strict=True))]
+    for key, title in (("max_gb", "图片容量上限"), ("min_free_gb", "预留磁盘容量"), ("requests_per_second", "每秒请求数")):
+        arguments += ["--" + key.replace("_", "-"), str(number(values, key, title, strict=key != "min_free_gb"))]
+    if stop_file:
+        arguments += ["--stop-file", str(stop_file)]
+    return arguments
+
+
 def build_prepare(values, stop_file=None):
     if values.get("data_source", DATA_SOURCES[0]) != DATA_SOURCES[0]:
-        raise ValueError("训练仅支持 OpenStreetView-5M，不接受其他数据来源")
-    from streetgeo.datasets.osv5m import osv_layout
-    root = resolve_path(values.get("osv_root") or DEFAULTS["osv_root"])
-    osv_layout(root)
+        raise ValueError("训练仅支持 Mapillary，不接受其他数据来源")
+    from streetgeo.datasets.sources import resolve_source
+    root = resolve_path(values.get("mapillary_root") or DEFAULTS["mapillary_root"])
+    resolve_source(root)
     if not values["split_output"].strip():
         raise ValueError("请选择数据划分输出目录")
     arguments = ["--dataset-root", str(root), "--output-dir", str(resolve_path(values["split_output"])),
@@ -125,6 +169,12 @@ def build_gpu_check(values):
     if values["model_config"].strip():
         arguments += ["--model-config", input_file(values["model_config"], "模型配置")]
     return arguments
+
+
+def build_road_mask(values):
+    from streetgeo.datasets.road_mask import RoadMask
+    return RoadMask(*(number(values, key, title, strict=True) / 100 for key, title in (
+        ("road_mask_top_width", "梯形上底"), ("road_mask_bottom_width", "梯形下底"), ("road_mask_height", "梯形高度"))))
 
 
 def build_training(values, stop_file):
@@ -145,11 +195,24 @@ def build_training(values, stop_file):
     output = validate_checkpoint_path(resolve_path(values["output"]))
     if output.exists() or output.with_name(output.stem + ".last" + output.suffix).exists():
         raise ValueError("该位置已有训练进度，请选择“继续上次训练”或更换输出文件")
-    from streetgeo.datasets.policy import check_osv_manifest_header
-    check_osv_manifest_header(input_file(values["train_manifest"], "OpenStreetView-5M 训练清单"))
+    environment = values.get("environment_specialist", "关闭")
+    if environment not in ("关闭", "开启 · 全图/专项交替"):
+        raise ValueError("请选择有效的环境专项微调模式")
+    if environment != "关闭":
+        input_file(values.get("init_from", ""), "环境专项初始模型")
+        if not values["val_manifest"].strip():
+            raise ValueError("环境专项微调需要 Mapillary 验证清单")
+        arguments += ["--environment-specialist",
+                      "--unfreeze-last", str(number(values, "unfreeze_last", "末端解冻层数", integer=True, strict=True)),
+                      "--visual-learning-rate", str(number(values, "visual_learning_rate", "视觉层学习率", strict=True))]
+        mask = build_road_mask(values)
+        arguments += ["--road-mask-top-width", str(mask.top_width),
+                      "--road-mask-bottom-width", str(mask.bottom_width), "--road-mask-height", str(mask.height)]
+    from streetgeo.datasets.policy import check_mapillary_manifest_header
+    check_mapillary_manifest_header(input_file(values["train_manifest"], "Mapillary 训练清单"))
     if values["val_manifest"].strip():
-        check_osv_manifest_header(input_file(values["val_manifest"], "OpenStreetView-5M 验证清单"))
-    arguments += ["--train-manifest", input_file(values["train_manifest"], "OpenStreetView-5M 训练清单"),
+        check_mapillary_manifest_header(input_file(values["val_manifest"], "Mapillary 验证清单"))
+    arguments += ["--train-manifest", input_file(values["train_manifest"], "Mapillary 训练清单"),
                   "--output", str(output), "--amp", amp]
     if values["val_manifest"].strip():
         arguments += ["--val-manifest", input_file(values["val_manifest"], "验证清单")]

@@ -42,6 +42,24 @@ class EpochBatchSampler:
         return self.total_batches - self.start_batch
 
 
+class AlternatingBatchSampler:
+    """Full then masked views of the same batch; start_batch counts optimizer updates."""
+    def __init__(self, length, batch_size, seed, epoch, start_batch=0):
+        total = 2 * ((length + batch_size - 1) // batch_size)
+        if not 0 <= start_batch <= total:
+            raise ValueError("checkpoint batch position is outside this alternating epoch")
+        self.source = EpochBatchSampler(length, batch_size, seed, epoch, start_batch // 2)
+        self.start_phase, self.remaining = start_batch % 2, total - start_batch
+
+    def __iter__(self):
+        for number, batch in enumerate(self.source):
+            for phase in range(self.start_phase if number == 0 else 0, 2):
+                yield [(index, phase) for index in batch]
+
+    def __len__(self):
+        return self.remaining
+
+
 class StopRequest:
     """First signal waits for a committed optimizer step, second signal aborts."""
 

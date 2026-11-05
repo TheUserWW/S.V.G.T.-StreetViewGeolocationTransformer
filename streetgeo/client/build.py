@@ -10,11 +10,11 @@ from pathlib import Path
 import shutil
 
 from streetgeo import PROJECT_SHORT_NAME, PROJECT_NAME
-from streetgeo.paths import ROOT
+from streetgeo.paths import MAP_ASSETS, ROOT
 
 PACKAGE_FILES = (
     "__init__.py", "paths.py", "core/__init__.py", "core/config.py", "core/model.py",
-    "core/geography.py", "core/checkpoints.py", "datasets/__init__.py", "datasets/images.py", "datasets/policy.py",
+    "core/geography.py", "core/checkpoints.py", "datasets/__init__.py", "datasets/images.py", "datasets/policy.py", "datasets/road_mask.py",
     "inference/__init__.py", "inference/backend.py", "inference/predict.py", "maps/__init__.py",
     "inference/coverage.py",
     "inference/explain.py", "inference/explanation_text.py", "ui/explanation.py",
@@ -68,7 +68,7 @@ def build_client(output, checkpoint=None):
     for relative in PACKAGE_FILES:
         copy(ROOT / "streetgeo" / relative, Path("streetgeo") / relative)
     for filename in MAP_FILES:
-        copy(ROOT / "assets" / "maps" / filename, Path("assets/maps") / filename)
+        copy(MAP_ASSETS / filename, Path("assets/maps") / filename)
     templates = Path(__file__).resolve().parent
     for filename in ("bootstrap.py", "app.py", "requirements.txt", "requirements-torch-cpu.txt"):
         copy(templates / filename, filename)
@@ -89,7 +89,8 @@ def build_client(output, checkpoint=None):
                 "languages": ["zh", "en"], "features": ["model_file_selection", "street_view_images", "map_predictions",
                                                           "attention_heatmaps", "manual_occlusion", "explanation_png_export",
                                                           "google_streetview_region_filter", "clipboard_images", "native_file_drop",
-                                                          "manual_map_pin", "feedback_learning", "round_history", "base_personal_profiles"], "model_included": False,
+                                                          "manual_map_pin", "feedback_learning", "round_history", "base_personal_profiles",
+                                                          "resizable_sidebar"], "model_included": False,
                 "files": {name: {"sha256": sha256(output / name), "bytes": (output / name).stat().st_size}
                           for name in sorted(generated)}}
     (output / "CLIENT_MANIFEST.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -130,7 +131,8 @@ def build_archive(output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default="clinet")
+    parser.add_argument("--output", default=ROOT / "dist" / "prediction_client",
+                        help="distribution directory (default: dist/prediction_client in the workspace)")
     parser.add_argument("--checkpoint", help="optional external model to validate; never copied into the client or archive")
     args = parser.parse_args()
     print(json.dumps(build_client(args.output, args.checkpoint), ensure_ascii=True, indent=2))

@@ -16,4 +16,4 @@ python -m streetgeo predict photo.jpg --checkpoint path/to/model.pt --google-cov
 
 单次预测、随机 test、全量 test 评估、关注区域和遮挡分析使用同一开关。真实测试标签不参与筛选；全量评估仍遍历原测试集，范围外样本也计入误差。评估报告和导出的预测 JSON 记录是否启用、名单版本及粗筛级别，便于区分实验。切换开关会清除旧预测并关闭旧解释窗口。
 
-重新构建分发客户端：`python -m streetgeo build-client --output clinet`。构建会带入范围代码与名单；分发 ZIP 不包含权重、本地环境、缓存或个人偏好。
+重新构建分发客户端：`python -m streetgeo build-client`。构建会带入范围代码与名单；分发 ZIP 不包含权重、本地环境、缓存或个人偏好。

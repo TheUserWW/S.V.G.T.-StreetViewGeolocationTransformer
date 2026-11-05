@@ -11,7 +11,7 @@ from PIL import Image, ImageTk
 
 from streetgeo.maps.projection import project, unproject, wrap_delta
 from streetgeo.maps.basemap import display_geometry, load_boundaries, load_shapes
-from streetgeo.inference.backend import ROOT, TileCache
+from streetgeo.inference.backend import TileCache
 
 from streetgeo.ui.common import (FONT, INPUT, MAP_BORDER, MAP_DASH, MAP_LABEL,
                                  MAP_LAND, MAP_OCEAN, MUTED, PANEL, PRIMARY, WARNING)

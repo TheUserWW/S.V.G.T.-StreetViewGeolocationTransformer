@@ -25,7 +25,7 @@ htmlcov/
 *.safetensors
 *.onnx
 
-# Generated client bundle; maintain its sources in streetgeo/client/
+# Generated builds, including the legacy client output directory
 /clinet/
 /build/
 /dist/

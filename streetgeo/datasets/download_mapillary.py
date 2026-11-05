@@ -1,4 +1,4 @@
-"""Resumable U.S. Mapillary image collection using the official Graph API.
+"""Resumable worldwide Mapillary image collection using the official Graph API.
 
 SQLite commits discovery cursors before downloading, so interruptions never
 lose discovered IDs. Re-running the same command resumes the same dataset.
@@ -23,6 +23,7 @@ from PIL import Image
 from streetgeo.datasets.mapillary_client import (DownloadError, MapillaryClient, MapillaryHTTPError,
                               RetryableDownloadError, ThumbnailUnavailable)
 from streetgeo.datasets.us_boundaries import USBoundary, fetch_boundaries
+from streetgeo.datasets.regions import SelectionBoundary, country_catalog, region_catalog, parse_codes
 
 FIELDS = ("id,computed_geometry,geometry,computed_compass_angle,compass_angle,"
           "camera_type,is_pano,captured_at,sequence,creator")
@@ -105,6 +106,7 @@ class DownloadStore:
         # Migrate existing queues in place, without changing images or cursors.
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(tiles)")}
         for name, definition in (("root_id", "INTEGER"), ("depth", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("queue_group", "INTEGER"), ("queue_turn", "INTEGER NOT NULL DEFAULT 0"),
                                  ("failures", "INTEGER NOT NULL DEFAULT 0"),
                                  ("retry_at", "REAL NOT NULL DEFAULT 0"),
                                  ("last_failed_run", "TEXT"), ("error", "TEXT")):
@@ -113,6 +115,7 @@ class DownloadStore:
         self.db.execute("CREATE INDEX IF NOT EXISTS tiles_root ON tiles(root_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS tiles_ready ON tiles(done,depth DESC,id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS tiles_deferred ON tiles(done,retry_at)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS tiles_turn ON tiles(queue_turn)")
         if not saved:
             with self.db:
                 self.db.execute("INSERT INTO settings VALUES (1, ?)", (encoded,))
@@ -120,6 +123,7 @@ class DownloadStore:
                                     ((index, json.dumps(tile)) for index, tile in enumerate(tiles)))
         with self.db:
             self.db.execute("UPDATE tiles SET root_id=id WHERE root_id IS NULL")
+            self.db.execute("UPDATE tiles SET queue_group=root_id WHERE queue_group IS NULL")
         # Missing files are recoverable; never claim they are downloaded.
         missing = [(identifier,) for (identifier,) in self.db.execute("SELECT id FROM images WHERE status=1")
                    if not (self.folder / "images" / f"{identifier}.jpg").is_file()]
@@ -137,15 +141,41 @@ class DownloadStore:
     def _root_selected(self, root_id):
         return self.db.execute("SELECT COALESCE(SUM(selected),0) FROM tiles WHERE root_id=?", (root_id,)).fetchone()[0]
 
-    def next_tile(self, run_id, max_per_tile):
+    def next_tile(self, run_id, max_per_tile, max_tile_size=None, boundary=None):
+        spread = boundary is not None and getattr(boundary, "spread_tiles", False)
+        order = ("COALESCE((SELECT queue_turn FROM tiles q WHERE q.id=t.queue_group),0),t.depth DESC,t.id"
+                 if spread else "t.depth DESC,t.id")
         while True:
             tile = self.db.execute(
-                "SELECT id,bbox,cursor,selected,root_id FROM tiles WHERE done=0 AND retry_at<=? "
-                "AND (last_failed_run IS NULL OR last_failed_run!=?) ORDER BY depth DESC,id LIMIT 1",
+                "SELECT t.id,t.bbox,t.cursor,t.selected,t.root_id,t.queue_group FROM tiles t WHERE t.done=0 AND t.retry_at<=? "
+                "AND (t.last_failed_run IS NULL OR t.last_failed_run!=?) ORDER BY " + order + " LIMIT 1",
                 (time.time(), run_id)).fetchone()
             if tile is None:
                 return None
+            bounds = json.loads(tile[1])
+            west, south, east, north = bounds
+            if max_tile_size and max(east - west, north - south) > max_tile_size + 1e-9:
+                mid_lon, mid_lat = (west + east) / 2, (south + north) / 2
+                children = [(west, south, mid_lon, mid_lat), (mid_lon, south, east, mid_lat),
+                            (west, mid_lat, mid_lon, north), (mid_lon, mid_lat, east, north)]
+                # Coarse queue cells have never been queried; each fine cell gets
+                # its own quota root. Recovery subdivisions retain their old root.
+                with self.db:
+                    self.db.execute("UPDATE tiles SET done=1 WHERE id=?", (tile[0],))
+                    depth = self.db.execute("SELECT depth FROM tiles WHERE id=?", (tile[0],)).fetchone()[0]
+                    for child in children:
+                        if boundary is None or boundary.intersects(child):
+                            result = self.db.execute("INSERT INTO tiles(bbox,depth,queue_group) VALUES (?,?,?)",
+                                                     (json.dumps(child), depth + 1, tile[5]))
+                            self.db.execute("UPDATE tiles SET root_id=id WHERE id=?", (result.lastrowid,))
+                continue
             if self._root_selected(tile[4]) < max_per_tile:
+                if spread:
+                    # Persist round-robin scheduling across the shuffled coarse
+                    # cells, so a finite download target covers many places.
+                    with self.db:
+                        self.db.execute("UPDATE tiles SET queue_turn=(SELECT MAX(queue_turn)+1 FROM tiles) WHERE id=?",
+                                        (tile[5],))
                 return tile[:4]
             with self.db:
                 self.db.execute("UPDATE tiles SET done=1 WHERE root_id=? AND done=0", (tile[4],))
@@ -153,12 +183,13 @@ class DownloadStore:
     def recover_query(self, tile, error, run_id):
         """Persist subdivision or deferred retry; never mark failed work complete."""
         tile_id, encoded_bounds = tile[:2]
-        root_id, depth, failures = self.db.execute(
-            "SELECT root_id,depth,failures FROM tiles WHERE id=?", (tile_id,)).fetchone()
+        root_id, depth, failures, queue_group = self.db.execute(
+            "SELECT root_id,depth,failures,queue_group FROM tiles WHERE id=?", (tile_id,)).fetchone()
+        root_depth = self.db.execute("SELECT depth FROM tiles WHERE id=?", (root_id,)).fetchone()[0]
         west, south, east, north = json.loads(encoded_bounds)
         split = (isinstance(error, MapillaryHTTPError)
                  and (error.status == 500 or error.query_too_large)
-                 and depth < 4 and min(east - west, north - south) / 2 >= 0.005 - 1e-9)
+                 and depth - root_depth < 4 and min(east - west, north - south) / 2 >= 0.005 - 1e-9)
         with self.db:
             if split:
                 lon, lat = (west + east) / 2, (south + north) / 2
@@ -166,8 +197,8 @@ class DownloadStore:
                             (west, lat, lon, north), (lon, lat, east, north))
                 self.db.execute("UPDATE tiles SET done=2,failures=failures+1,error=? WHERE id=?",
                                 (str(error), tile_id))
-                self.db.executemany("INSERT INTO tiles(bbox,root_id,depth) VALUES (?,?,?)",
-                                    ((json.dumps(bounds), root_id, depth + 1) for bounds in children))
+                self.db.executemany("INSERT INTO tiles(bbox,root_id,depth,queue_group) VALUES (?,?,?,?)",
+                                    ((json.dumps(bounds), root_id, depth + 1, queue_group) for bounds in children))
                 return "split"
             # Do not immediately hammer the same failed request again. Other
             # regions can continue; a later invocation retries it after cooldown.
@@ -281,6 +312,9 @@ def collect(args, client, boundary):
         "region", "states", "bbox", "tile_size", "seed", "resolution", "min_side",
         "max_per_tile", "max_per_sequence")}
     settings["boundary_fingerprint"] = boundary.fingerprint
+    for name in ("continents", "countries", "regions", "geojson"):
+        if getattr(args, name, None):
+            settings[name] = getattr(args, name)
     database = Path(args.output) / "downloads.sqlite3"
     tiles = [] if database.exists() else boundary.tiles(args.tile_size, args.seed, args.bbox)
     store = DownloadStore(args.output, settings, tiles)
@@ -340,7 +374,8 @@ def collect(args, client, boundary):
                     print("Reached --max-pages for this invocation; re-run to continue discovery", flush=True)
                     outcome = "discovery_limit"
                     break
-                tile = store.next_tile(run_id, args.max_per_tile)
+                tile = store.next_tile(run_id, args.max_per_tile, args.tile_size,
+                                       boundary if hasattr(boundary, "intersects") else None)
                 if tile is None:
                     if store.stats()["deferred_regions"]:
                         print("本次可查询区域已处理，其余失败区域保留待重试；稍后继续即可。", flush=True)
@@ -387,56 +422,85 @@ def collect(args, client, boundary):
                               "output": str(Path(args.output).resolve()), **store.stats()}), flush=True)
         finally:
             store.close()
+    return outcome
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", default="data/mapillary_us")
-    parser.add_argument("--boundary", default="data/boundaries/us_states.geojson")
-    parser.add_argument("--boundary-only", action="store_true", help="cache Census boundaries without a Mapillary token")
-    parser.add_argument("--region", choices=("conus", "us"), default="conus")
-    parser.add_argument("--states", type=lambda value: sorted(set(value.upper().split(","))))
+def add_collection_arguments(parser, *, for_training=False):
+    """Shared CLI for download and download-then-train."""
+    if for_training:
+        parser.add_argument("--download-output", default="data/mapillary")
+    else:
+        parser.add_argument("--download-output", "--output", dest="output", default="data/mapillary")
+    parser.add_argument("--boundary", default="data/boundaries/us_states.geojson", help="legacy US Census cache")
+    parser.add_argument("--boundary-only", action="store_true", help="cache US Census boundaries without a token")
+    parser.add_argument("--region", choices=("world", "conus", "us"), default="world")
+    parser.add_argument("--continents", type=lambda value: sorted(set(part.strip().lower() for part in value.split(",") if part.strip())), default=[])
+    parser.add_argument("--countries", type=parse_codes, default=[], help="comma-separated ISO alpha-3 codes, e.g. CHN,JPN,USA")
+    parser.add_argument("--regions", type=parse_codes, default=[], help="administrative codes, e.g. US-CA,US-NY; other areas via --geojson/--bbox")
+    parser.add_argument("--geojson", help="local WGS84 Polygon/MultiPolygon boundary for any province/city/region")
+    parser.add_argument("--list-regions", action="store_true", help="list countries and built-in administrative regions without a token")
+    parser.add_argument("--states", type=lambda value: sorted(set(value.upper().split(","))), help="US state codes; shorthand for --regions US-XX")
     parser.add_argument("--bbox", nargs=4, type=float, metavar=("WEST", "SOUTH", "EAST", "NORTH"))
     parser.add_argument("--max-images", type=int, default=10000, help="target total, including previous downloads")
     parser.add_argument("--max-pages", type=int, default=2000, help="API discovery budget per invocation")
     parser.add_argument("--max-per-tile", type=int, default=30)
     parser.add_argument("--max-per-sequence", type=int, default=50)
     parser.add_argument("--tile-size", type=float, default=0.08)
-    parser.add_argument("--seed", type=int, default=1337)
-    parser.add_argument("--resolution", type=int, choices=(256, 1024, 2048), default=1024,
-                        help="preferred thumbnail size; automatically try larger variants if the short side is insufficient")
-    parser.add_argument("--min-side", type=int, default=224, help="minimum accepted short side in pixels")
+    if not for_training:
+        parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--resolution", type=int, choices=(256, 1024, 2048), default=1024)
+    parser.add_argument("--min-side", type=int, default=224)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--requests-per-second", type=float, default=2)
     parser.add_argument("--max-gb", type=float, default=20)
     parser.add_argument("--min-free-gb", type=float, default=5)
     parser.add_argument("--prompt-token", action="store_true", help="read token without echoing it")
-    parser.add_argument("--stop-file", help="GUI stop request file; checked between download batches")
-    args = parser.parse_args()
+    if not for_training:
+        parser.add_argument("--stop-file", help="GUI stop request file; checked between download batches")
+
+
+def run_collection(args):
+    """Validate selections before networking; credentials never enter arguments or settings."""
+    if args.list_regions:
+        print(json.dumps({"countries": country_catalog(), "regions": region_catalog()}, ensure_ascii=False, indent=2))
+        return False
     for name in ("max_images", "max_pages", "max_per_tile", "max_per_sequence", "workers", "min_side"):
         if getattr(args, name) <= 0:
-            parser.error(f"{name} must be positive")
-    if not 0 < args.tile_size <= 0.09 or args.requests_per_second <= 0 or args.max_gb <= 0 or args.min_free_gb < 0:
-        parser.error("invalid tile-size, request rate or disk budget")
+            raise ValueError(f"{name} must be positive")
+    if (not all(math.isfinite(getattr(args, name)) for name in ("tile_size", "requests_per_second", "max_gb", "min_free_gb"))
+            or not 0 < args.tile_size <= 0.09 or args.requests_per_second <= 0 or args.max_gb <= 0 or args.min_free_gb < 0):
+        raise ValueError("invalid tile-size, request rate or disk budget")
     if args.bbox and not (-180 <= args.bbox[0] < args.bbox[2] <= 180 and -90 <= args.bbox[1] < args.bbox[3] <= 90):
-        parser.error("bbox must be WEST SOUTH EAST NORTH without crossing the antimeridian")
-    token = None
-    if not args.boundary_only:
-        token = getpass.getpass("Mapillary client access token (not saved): ") if args.prompt_token else os.environ.get("MAPILLARY_ACCESS_TOKEN")
-        if not token:
-            parser.error("set MAPILLARY_ACCESS_TOKEN locally, or use --prompt-token; never put the token in source code")
-    fetch_boundaries(args.boundary)
+        raise ValueError("bbox must be WEST SOUTH EAST NORTH without crossing the antimeridian")
+    if args.region != "world" and (args.continents or args.countries or args.regions or args.geojson):
+        raise ValueError("--region us/conus cannot be combined with worldwide selections; use --region world")
     if args.boundary_only:
+        fetch_boundaries(args.boundary)
         print(f"Boundary cache ready: {args.boundary}")
-        return
-    boundary = USBoundary(args.boundary, args.region, args.states)
+        return False
+    if args.region == "world":
+        args.regions = sorted(set(args.regions) | {"US-" + code for code in (args.states or [])})
+        boundary = SelectionBoundary(continents=args.continents, countries=args.countries,
+                                     regions=args.regions, geojson=args.geojson, bbox=args.bbox)
+    else:
+        fetch_boundaries(args.boundary)
+        boundary = USBoundary(args.boundary, args.region, args.states)
+    token = getpass.getpass("Mapillary client access token (not saved): ") if args.prompt_token else os.environ.get("MAPILLARY_ACCESS_TOKEN", "").strip()
+    if not token:
+        raise ValueError("set MAPILLARY_ACCESS_TOKEN locally, or use --prompt-token")
     client = MapillaryClient(token, args.requests_per_second,
                              on_retry=lambda event: print(json.dumps(event), flush=True))
+    return collect(args, client, boundary)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_collection_arguments(parser)
+    args = parser.parse_args()
     try:
-        collect(args, client, boundary)
-    except DownloadError as error:
-        print(f"下载请求失败：{error}。已保存的图片和清单仍可继续使用。", flush=True)
-        raise SystemExit(1) from None
+        run_collection(args)
+    except (DownloadError, ValueError, OSError) as error:
+        parser.exit(1, f"下载失败：{error}。已有图片和进度仍保留。\n")
 
 
 if __name__ == "__main__":

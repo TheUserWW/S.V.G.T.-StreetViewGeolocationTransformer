@@ -22,14 +22,16 @@ def main():
         checkpoint = read_checkpoint(args.path)
         state = checkpoint["training_state"]
         if state.get("resume_version") == 1:
-            from streetgeo.datasets.policy import check_osv_manifest_header
-            check_osv_manifest_header(state["train_manifest"])
+            from streetgeo.datasets.policy import check_mapillary_manifest_header
+            check_mapillary_manifest_header(state["train_manifest"])
             if state.get("val_manifest"):
-                check_osv_manifest_header(state["val_manifest"])
+                check_mapillary_manifest_header(state["val_manifest"])
         info = {"event": "checkpoint_info", "resumable": state.get("resume_version") == 1,
                 "model_config": checkpoint["model_config"],
                 "epoch": state.get("epoch", 0), "step": state.get("global_step", 0),
                 "next_batch": state.get("next_batch", 0), "run_config": state.get("run_config", {}),
+                "next_phase": state.get("next_phase", "full"),
+                "environment_recipe": state.get("environment_recipe"),
                 "output": state.get("output_path"), "train_manifest": state.get("train_manifest"),
                 "val_manifest": state.get("val_manifest")}
     print(json.dumps(info, ensure_ascii=False), flush=True)

@@ -15,8 +15,8 @@ from streetgeo.core import EmptyPredictionDomainError
 from streetgeo.paths import ROOT
 from streetgeo.inference.backend import InferenceEngine, read_picture
 from streetgeo.maps.widgets import WorldMap
-from streetgeo.ui.common import (ACCENT, BG, BORDER, FONT, INPUT, MUTED, NAV, PANEL,
-                                 SURFACE, TEXT, ScrollFrame, apply_dark_theme, button, label)
+from streetgeo.ui.common import (ACCENT, BG, FONT, INPUT, MUTED, NAV, PANEL,
+                                 SURFACE, TEXT, ScrollFrame, SidebarLayout, apply_dark_theme, button, label)
 
 if __package__:
     from .i18n import LANGUAGES, map_text, read_language, text
@@ -25,6 +25,8 @@ else:
 
 
 class ClientApp:
+    default_sidebar_width = 336
+
     def __init__(self, root, *, settings_path=None, engine=None, checkpoint=None, language=None, device="cpu"):
         self.root = root
         self.prediction_device = device
@@ -44,6 +46,7 @@ class ClientApp:
         default_checkpoint = str(ROOT / "best.pt") if (ROOT / "best.pt").is_file() else ""
         self.checkpoint = tk.StringVar(value=str(checkpoint) if checkpoint is not None else saved_checkpoint or default_checkpoint)
         self.google_coverage_only = tk.BooleanVar(value=preferences.get("google_coverage_only") is True)
+        self._sidebar_width = preferences.get("sidebar_width")
         self.engine = engine if engine is not None else InferenceEngine()
         self.images, self.candidates = [], []
         self.result, self.preview_photo = None, None
@@ -105,11 +108,10 @@ class ClientApp:
         self.model_entry = ttk.Entry(models, textvariable=self.checkpoint, font=(FONT, 9))
         self.model_entry.pack(side="left", fill="x", expand=True, pady=7)
         self.model_entry.bind("<FocusOut>", lambda _: self._save_settings())
-        body = tk.Frame(root, bg=BG)
-        body.pack(fill="both", expand=True, padx=18, pady=18)
-        left = tk.Frame(body, bg=PANEL, width=336, highlightbackground=BORDER, highlightthickness=1)
-        left.pack(side="left", fill="y", padx=(0, 16))
-        left.pack_propagate(False)
+        self.sidebar_layout = SidebarLayout(root, width=self._sidebar_width, default_width=self.default_sidebar_width,
+                                            on_resize=lambda _: self._save_settings())
+        self.sidebar_layout.pack(fill="both", expand=True, padx=18, pady=18)
+        left = self.sidebar_layout.sidebar
         sidebar = ScrollFrame(left)
         sidebar.pack(fill="both", expand=True)
         fields = sidebar.content
@@ -138,8 +140,8 @@ class ClientApp:
         self.candidate_list.pack(fill="x")
         self.candidate_list.bind("<<ListboxSelect>>", self.select_candidate)
         self._text(label(fields, size=8, color=MUTED, wraplength=282), "local").pack(side="bottom", fill="x", pady=(12, 0))
-        right = tk.Frame(body, bg=BG)
-        right.pack(side="left", fill="both", expand=True)
+        right = tk.Frame(self.sidebar_layout.content, bg=BG)
+        right.pack(fill="both", expand=True, padx=(10, 0))
         tools = tk.Frame(right, bg=BG)
         tools.pack(fill="x", pady=(0, 10))
         self._text(label(tools, size=14, bold=True), "results").pack(side="left")
@@ -180,13 +182,16 @@ class ClientApp:
         self._refresh_text()
         self._save_settings()
 
+    def _settings(self):
+        return {"language": self.language, "checkpoint": self.checkpoint.get().strip(),
+                "google_coverage_only": self.google_coverage_only.get(),
+                "sidebar_width": self.sidebar_layout.sidebar_width}
+
     def _save_settings(self):
         try:
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.settings_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps({"language": self.language, "checkpoint": self.checkpoint.get().strip(),
-                                             "google_coverage_only": self.google_coverage_only.get()},
-                                            ensure_ascii=False), encoding="utf-8")
+            temporary.write_text(json.dumps(self._settings(), ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, self.settings_path)
         except OSError:
             pass

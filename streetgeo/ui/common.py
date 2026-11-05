@@ -117,6 +117,62 @@ def button(parent, text, command, *, primary=False, **options):
                      highlightthickness=0, **spacing)
 
 
+class SidebarLayout(tk.PanedWindow):
+    """A draggable sidebar that keeps the content usable and remembers its width."""
+
+    def __init__(self, parent, *, width=None, default_width=336, min_sidebar=280,
+                 max_sidebar=640, min_content=420, sidebar_bg=PANEL, on_resize=None):
+        super().__init__(parent, orient="horizontal", bg=BORDER, bd=0,
+                         sashwidth=8, sashrelief="flat", sashcursor="sb_h_double_arrow",
+                         opaqueresize=True)
+        self.min_sidebar, self.max_sidebar, self.min_content = min_sidebar, max_sidebar, min_content
+        self.on_resize = on_resize
+        try:
+            initial = int(width)
+        except (ValueError, TypeError, OverflowError):
+            initial = default_width
+        self._width = max(min_sidebar, min(max_sidebar, initial))
+        self._layout_id = None
+        self.sidebar = tk.Frame(self, bg=sidebar_bg, width=self._width)
+        self.sidebar.pack_propagate(False)
+        self.content = tk.Frame(self, bg=BG)
+        self.add(self.sidebar, minsize=min_sidebar, width=self._width, stretch="never")
+        self.add(self.content, minsize=min_content, stretch="always")
+        self.bind("<Configure>", self._schedule_layout)
+        self.bind("<ButtonRelease-1>", self._released)
+        self.bind("<Destroy>", self._destroyed)
+
+    @property
+    def sidebar_width(self):
+        return self._width
+
+    def _schedule_layout(self, _event=None):
+        if self._layout_id is not None:
+            self.after_cancel(self._layout_id)
+        self._layout_id = self.after_idle(self._fit)
+
+    def _fit(self):
+        self._layout_id = None
+        if self.winfo_width() <= 1:
+            return
+        available = self.winfo_width() - int(self.cget("sashwidth")) - self.min_content
+        width = max(self.min_sidebar, min(self._width, self.max_sidebar, available))
+        self.sash_place(0, width, 0)
+
+    def _released(self, _event=None):
+        if self._layout_id is not None:
+            self.after_cancel(self._layout_id)
+        self._width = max(self.min_sidebar, min(self.max_sidebar, self.sash_coord(0)[0]))
+        self._fit()
+        if self.on_resize:
+            self.on_resize(self._width)
+
+    def _destroyed(self, event):
+        if event.widget == self and self._layout_id is not None:
+            self.after_cancel(self._layout_id)
+            self._layout_id = None
+
+
 class ScrollFrame(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=PANEL)
@@ -126,10 +182,20 @@ class ScrollFrame(tk.Frame):
         scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.content = tk.Frame(self.canvas, bg=PANEL)
-        window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self._window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda event: self.canvas.itemconfigure(window, width=event.width))
+        self.canvas.bind("<Configure>", self._resize_content)
         self.bind_all("<MouseWheel>", self._wheel, add="+")
+
+    def _resize_content(self, event):
+        self.canvas.itemconfigure(self._window, width=event.width)
+        available = max(1, event.width - 2 * self.content.winfo_pixels(self.content.cget("padx")) - 6)
+        widgets = list(self.content.winfo_children())
+        while widgets:
+            widget = widgets.pop()
+            if isinstance(widget, (tk.Label, ttk.Label)) and widget.winfo_pixels(widget.cget("wraplength")) > 0:
+                widget.configure(wraplength=available)
+            widgets.extend(widget.winfo_children())
 
     def _wheel(self, event):
         current = self.winfo_containing(event.x_root, event.y_root)

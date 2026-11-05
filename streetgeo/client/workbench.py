@@ -17,7 +17,7 @@ from streetgeo.maps.projection import parse_coordinates, coordinates
 from streetgeo.maps.widgets import WorldMap
 from streetgeo.inference.sessions import SessionStore
 from streetgeo.ui.common import (ACCENT, BG, BORDER, FONT, INPUT, MUTED, NAV, PANEL,
-                                 SURFACE, TEXT, WARNING, ScrollFrame, apply_dark_theme, button, label)
+                                 TEXT, WARNING, ScrollFrame, SidebarLayout, apply_dark_theme, button, label)
 from streetgeo.ui.desktop_input import FileDropTarget, clipboard_content
 
 if __package__:
@@ -43,6 +43,8 @@ def _distance(a, b):
 
 
 class DailyApp(ClientApp):
+    default_sidebar_width = 350
+
     def __init__(self, root, *, settings_path=None, checkpoint=None, engine=None, language=None, device="cpu"):
         settings_path = Path(settings_path) if settings_path else ROOT / ".runtime/settings.json"
         saved = _preferences(settings_path)
@@ -113,10 +115,10 @@ class DailyApp(ClientApp):
         self.model_button = self._text(button(models,"",self.choose_checkpoint,padx=12,pady=7),"choose_base")
         self.model_button.pack(side="left", padx=10, pady=8)
 
-        body = tk.Frame(root,bg=BG)
-        body.pack(fill="both",expand=True,padx=18,pady=12)
-        left = tk.Frame(body,bg=PANEL,width=350,highlightbackground=BORDER,highlightthickness=1)
-        left.pack(side="left",fill="y",padx=(0,14));left.pack_propagate(False)
+        self.sidebar_layout = SidebarLayout(root, width=self._sidebar_width, default_width=self.default_sidebar_width,
+                                            min_content=480, on_resize=lambda _: self._save_settings())
+        self.sidebar_layout.pack(fill="both", expand=True, padx=18, pady=12)
+        left = self.sidebar_layout.sidebar
         sidebar = ScrollFrame(left);sidebar.pack(fill="both",expand=True)
         fields=sidebar.content;fields.configure(padx=14,pady=14)
         self._text(label(fields,size=11,bold=True),"step_images").pack(anchor="w")
@@ -162,7 +164,7 @@ class DailyApp(ClientApp):
         self.explain_button.pack(fill="x",pady=(10,0))
         self.coverage_check=ttk.Checkbutton(fields,variable=self.google_coverage_only,command=self._coverage_changed)
 
-        right=tk.Frame(body,bg=BG);right.pack(side="left",fill="both",expand=True)
+        right=tk.Frame(self.sidebar_layout.content,bg=BG);right.pack(fill="both",expand=True,padx=(10,0))
         map_tools=tk.Frame(right,bg=BG);map_tools.pack(fill="x",pady=(0,7))
         self._text(label(map_tools,size=12,bold=True),"results").pack(side="left")
         self._text(button(map_tools,"",self.map_world,padx=9,pady=5),"world").pack(side="right",padx=(5,0))
@@ -212,19 +214,13 @@ class DailyApp(ClientApp):
         if self.history_window is not None and self.history_window.winfo_exists():self.history_window.title(self.t("history"))
         if self.settings_window is not None and self.settings_window.winfo_exists():self.settings_window.title(self.t("settings"))
 
-    def _save_settings(self):
-        super()._save_settings()
-        try:
-            saved=_preferences(self.settings_path)
-            saved.update(base_checkpoint=self.base_checkpoint,personal_checkpoint=self.personal_checkpoint,
-                         auto_predict=self.auto_predict.get(),auto_learn=self.auto_learn.get(),
-                         online_roads=self.online_roads.get(),device=self.device_choice.get(),
-                         learning_updates=self.learning_updates,learning_memory=self.learning_memory)
-            temp=self.settings_path.with_suffix(".tmp")
-            temp.write_text(json.dumps(saved,ensure_ascii=False,indent=2),encoding="utf-8")
-            os.replace(temp,self.settings_path)
-        except OSError:
-            pass
+    def _settings(self):
+        saved = super()._settings()
+        saved.update(base_checkpoint=self.base_checkpoint, personal_checkpoint=self.personal_checkpoint,
+                     auto_predict=self.auto_predict.get(), auto_learn=self.auto_learn.get(),
+                     online_roads=self.online_roads.get(), device=self.device_choice.get(),
+                     learning_updates=self.learning_updates, learning_memory=self.learning_memory)
+        return saved
 
     def _set_busy(self,busy):
         super()._set_busy(busy)

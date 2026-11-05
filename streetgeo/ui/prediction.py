@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageTk
 from streetgeo import PROJECT_SHORT_NAME
 from streetgeo.ui.common import (ACCENT, BG, BORDER, FONT, INPUT, MUTED, NAV, PANEL,
                                  SELECTION, SURFACE, TEXT, WARNING, ScrollFrame,
-                                 apply_dark_theme, button, label)
+                                 apply_dark_theme, button, label, SidebarLayout)
 from streetgeo.maps.projection import ControlPoint, ScreenshotCalibration, parse_coordinates
 from streetgeo.maps.widgets import ScreenshotCanvas, WorldMap
 from streetgeo.inference.backend import InferenceEngine, ROOT, read_picture
@@ -52,6 +52,7 @@ class PredictionApp:
         device = preferences.get("device", default_device)
         self.device = tk.StringVar(value=device if device in ("auto", "cuda", "cpu") else "auto")
         self.google_coverage_only = tk.BooleanVar(value=preferences.get("google_coverage_only") is True)
+        self._sidebar_width = preferences.get("sidebar_width")
         self.test_directory = tk.StringVar(value=str(preferences.get("test_directory", ROOT / "data" / "OpenStreetView-5M" / "test")))
         self.test_sample = None
         self.test_sampler = OSVTestSampler()
@@ -92,11 +93,10 @@ class PredictionApp:
         header.pack(fill="x")
         label(header, f"{PROJECT_SHORT_NAME}  /  本地预测地图", size=17, color="white", bold=True).pack(side="left", padx=24, pady=20)
         label(header, "街景 → 经纬度 → 地图落点", size=10, color="#9ab9c8").pack(side="right", padx=24)
-        body = tk.Frame(root, bg=BG)
-        body.pack(fill="both", expand=True, padx=18, pady=(16, 6))
-        left = tk.Frame(body, bg=PANEL, width=338, highlightbackground=BORDER, highlightthickness=1)
-        left.pack(side="left", fill="y", padx=(0, 14))
-        left.pack_propagate(False)
+        self.sidebar_layout = SidebarLayout(root, width=self._sidebar_width, default_width=338,
+                                            min_content=500, on_resize=lambda _: self._save_settings())
+        self.sidebar_layout.pack(fill="both", expand=True, padx=18, pady=(16, 6))
+        left = self.sidebar_layout.sidebar
         scroll = ScrollFrame(left)
         scroll.pack(fill="both", expand=True, padx=12, pady=10)
         fields = scroll.content
@@ -231,8 +231,8 @@ class PredictionApp:
         self.input_widgets.append(button(fields, "在地图上标记", self.use_manual, pady=7))
         self.input_widgets[-1].grid(row=row, column=0, sticky="ew", pady=(7, 12))
 
-        right = tk.Frame(body, bg=BG)
-        right.pack(side="left", fill="both", expand=True)
+        right = tk.Frame(self.sidebar_layout.content, bg=BG)
+        right.pack(fill="both", expand=True, padx=(10, 0))
         top = tk.Frame(right, bg=BG)
         top.pack(fill="x", pady=(0, 10))
         label(top, "预测位置", size=14, bold=True).pack(side="left")
@@ -1088,6 +1088,7 @@ class PredictionApp:
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.settings_path.with_suffix(".tmp")
             temporary.write_text(json.dumps({"checkpoint": self.checkpoint.get(), "device": self.device.get(),
+                                             "sidebar_width": self.sidebar_layout.sidebar_width,
                                              "test_directory": self.test_directory.get(),
                                              "google_coverage_only": self.google_coverage_only.get(),
                                              "evaluation_batch": self.evaluation_batch.get()}, ensure_ascii=False), encoding="utf-8")

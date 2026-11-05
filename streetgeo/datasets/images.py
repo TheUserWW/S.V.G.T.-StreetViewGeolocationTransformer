@@ -9,10 +9,12 @@ from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 
 from streetgeo.core.config import ModelConfig
-from streetgeo.datasets.policy import require_osv_row
+from streetgeo.datasets.policy import require_mapillary_row
+from streetgeo.datasets.road_mask import RoadMask, MASK_FILL
 
 IMAGE_MEAN = (0.485, 0.456, 0.406)
 IMAGE_STD = (0.229, 0.224, 0.225)
+IMAGE_FILL = MASK_FILL
 
 
 def manifest_lines(path):
@@ -21,7 +23,7 @@ def manifest_lines(path):
         yield from enumerate(stream, 1)
 
 
-def load_image(path, image_size=224):
+def load_image(path, image_size=224, *, road_mask=None, mask_bottom_third=False):
     """RGB, EXIF orientation, aspect-preserving letterbox, then normalization.
 
     Avoid random horizontal flips: they can reverse driving-side/sign clues.
@@ -29,8 +31,15 @@ def load_image(path, image_size=224):
     """
     with Image.open(path) as source:
         image = ImageOps.exif_transpose(source).convert("RGB")
+        if road_mask is not None and mask_bottom_third:
+            raise ValueError("choose one environment mask shape")
+        if road_mask is not None:
+            image = road_mask.apply(image)
+        if mask_bottom_third:
+            # Retained only to resume checkpoints created with recipe version 1.
+            image.paste(IMAGE_FILL, (0, image.height * 2 // 3, image.width, image.height))
         image = ImageOps.pad(image, (image_size, image_size),
-                             method=Image.Resampling.BICUBIC, color=(124, 116, 104))
+                             method=Image.Resampling.BICUBIC, color=IMAGE_FILL)
         pixels = torch.frombuffer(bytearray(image.tobytes()), dtype=torch.uint8)
     pixels = pixels.reshape(image_size, image_size, 3).permute(2, 0, 1).float() / 255
     mean = pixels.new_tensor(IMAGE_MEAN).view(3, 1, 1)
@@ -48,8 +57,12 @@ class StreetViewDataset(Dataset):
     contain null for unknown directions. Relative paths resolve beside JSONL.
     """
 
-    def __init__(self, manifest_path, config=None, *, osv5m_only=False):
+    def __init__(self, manifest_path, config=None, *, mapillary_only=False, environment_specialist=False,
+                 road_mask=None, legacy_environment_mask=False):
         self.config = config or ModelConfig()
+        self.environment_specialist = environment_specialist
+        self.road_mask = road_mask if road_mask is not None else RoadMask()
+        self.legacy_environment_mask = legacy_environment_mask
         manifest = Path(manifest_path).resolve()
         self.samples = []
         self.source_counts = {}
@@ -59,8 +72,8 @@ class StreetViewDataset(Dataset):
                 continue
             try:
                 row = json.loads(line)
-                if osv5m_only:
-                    require_osv_row(row)
+                if mapillary_only:
+                    require_mapillary_row(row)
                 if not isinstance(row, dict):
                     raise ValueError("each row must be a JSON object")
                 if "images" in row and "image" in row:
@@ -100,12 +113,37 @@ class StreetViewDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
+        phase = None
+        if isinstance(index, tuple):
+            index, phase = index
+            if not self.environment_specialist or phase not in (0, 1):
+                raise ValueError("invalid environment training phase")
         paths, coordinates, headings = self.samples[index]
-        return {
-            "images": torch.stack([load_image(path, self.config.image_size) for path in paths]),
+        # Workers spawned by an already-running version-1 trainer may unpickle
+        # a dataset created before these shape attributes existed.
+        legacy = getattr(self, "legacy_environment_mask", True)
+        sample = {
+            "images": torch.stack([load_image(path, self.config.image_size,
+                                  road_mask=self.road_mask if phase == 1 and not legacy else None,
+                                  mask_bottom_third=phase == 1 and legacy) for path in paths]),
             "coordinates": torch.tensor(coordinates, dtype=torch.float32),
             "headings": torch.tensor(headings, dtype=torch.float32),
         }
+        if phase is not None:
+            sample["training_phase"] = phase
+        return sample
+
+
+class EnvironmentViewDataset(Dataset):
+    """Reuse a validated dataset for masked evaluation without copying its metadata."""
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        return self.dataset[index, 1]
 
 
 def collate_streetviews(samples):
@@ -123,5 +161,11 @@ def collate_streetviews(samples):
         images[index, :count] = sample["images"]
         mask[index, :count] = True
         headings[index, :count] = sample["headings"]
-    return {"images": images, "view_mask": mask, "headings": headings,
-            "targets": torch.stack([sample["coordinates"] for sample in samples])}
+    result = {"images": images, "view_mask": mask, "headings": headings,
+              "targets": torch.stack([sample["coordinates"] for sample in samples])}
+    phases = {sample.get("training_phase") for sample in samples}
+    if len(phases) != 1:
+        raise ValueError("a batch must contain exactly one training phase")
+    if phases != {None}:
+        result["training_phase"] = torch.tensor(phases.pop())
+    return result

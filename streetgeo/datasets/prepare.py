@@ -1,4 +1,4 @@
-"""Prepare OpenStreetView-5M, including partial downloads, without copying images."""
+"""Prepare Mapillary API downloads without copying images."""
 
 import argparse
 from collections import Counter
@@ -8,11 +8,10 @@ import os
 from pathlib import Path
 import tempfile
 
-from streetgeo.datasets.sources import PreparationCancelled, check_cancel
+from streetgeo.datasets.sources import PreparationCancelled, check_cancel, iter_manifest, resolve_source
 from streetgeo.datasets.split import create_splits
-from streetgeo.datasets.osv5m import iter_osv5m, osv_layout
 
-PREPARATION_VERSION = 2
+PREPARATION_VERSION = 3
 OUTPUT_FILES = ("all.jsonl", "train.jsonl", "val.jsonl", "test.jsonl")
 
 
@@ -31,25 +30,32 @@ def _relative_row(row, output):
             return os.path.relpath(path, output).replace("\\", "/")
         except ValueError:  # Windows datasets and output can be on different drives.
             return str(Path(path)).replace("\\", "/")
-    if "images" in row:
-        row["images"] = [relative(path) for path in row["images"]]
-    else:
-        row["image"] = relative(row["image"])
+    row["image"] = relative(row["image"])
     return row
 
 
-def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_osv_514m", seed=1337,
+def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_mapillary", seed=1337,
                      block_degrees=0.02, guard_m=250, progress=None, cancelled=None):
     """An identical rerun reuses verified frozen files. Changed data needs a new folder."""
-    seed, block_degrees, guard_m = int(seed), float(block_degrees), float(guard_m)
     if manifests:
-        raise ValueError("仅接受 OpenStreetView-5M 原始目录，不接受 GSV-Cities、Mapillary 或自定义 JSONL 导入")
-    sources = list(dict.fromkeys(("osv5m", Path(path).expanduser().resolve()) for path in roots))
+        raise ValueError("仅接受 Mapillary API 下载目录，不接受其他来源或通用 JSONL 导入")
+    sources = list(dict.fromkeys(resolve_source(path) for path in roots))
     if not sources:
-        raise ValueError("请提供 OpenStreetView-5M 数据目录")
-    for _, path in sources:
-        check_cancel(cancelled)
-        osv_layout(path)
+        raise ValueError("请提供 Mapillary API 下载目录")
+    return _prepare_sources(sources, output_dir=output_dir, seed=seed, block_degrees=block_degrees,
+                            guard_m=guard_m, progress=progress, cancelled=cancelled)
+
+
+def prepare_manifest(manifest, *, output_dir=None, seed=1337, block_degrees=0.02, guard_m=250):
+    """The split CLI shares the same Mapillary validation and frozen publication."""
+    manifest = Path(manifest).expanduser().resolve()
+    return _prepare_sources([("mapillary", manifest)], output_dir=output_dir or manifest.parent / "splits",
+                            seed=seed, block_degrees=block_degrees, guard_m=guard_m)
+
+
+def _prepare_sources(sources, *, output_dir, seed, block_degrees, guard_m, progress=None, cancelled=None):
+    seed, block_degrees, guard_m = int(seed), float(block_degrees), float(guard_m)
+    check_cancel(cancelled)
     output = Path(output_dir).expanduser().resolve()
     config = {"preparation_version": PREPARATION_VERSION, "seed": seed,
               "block_degrees": block_degrees, "guard_m": guard_m,
@@ -60,15 +66,14 @@ def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_osv_514m"
     for kind, path in sources:
         check_cancel(cancelled)
         detail = {}
-        iterator = iter_osv5m(path, report=detail, progress=progress, cancelled=cancelled)
+        iterator = iter_manifest(path, report=detail, progress=progress, cancelled=cancelled)
         for row in iterator:
-            paths = row.get("images", [row["image"]] if "image" in row else [])
-            identity = tuple(os.path.normcase(path) for path in paths)
+            identity = row["mapillary_id"]
             if identity in seen:
                 previous = seen[identity]
                 if (abs(previous[0] - row["latitude"]) > 1e-5 or
                         abs(previous[1] - row["longitude"]) > 1e-5):
-                    raise ValueError(f"同一图片存在冲突坐标：{paths[0]}")
+                    raise ValueError(f"同一图片存在冲突坐标：{row['image']}")
                 duplicate_count += 1
                 continue
             seen[identity] = (row["latitude"], row["longitude"])
@@ -150,8 +155,8 @@ def prepare_datasets(*, roots=(), manifests=(), output_dir="data/world_osv_514m"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset-root", action="append", required=True, help="OpenStreetView-5M directory with train.csv and extracted training images")
-    parser.add_argument("--output-dir", default="data/world_osv_514m")
+    parser.add_argument("--dataset-root", action="append", required=True, help="Mapillary API download directory with all.jsonl and images/")
+    parser.add_argument("--output-dir", default="data/world_mapillary")
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--block-degrees", type=float, default=0.02)
     parser.add_argument("--guard-m", type=float, default=250)

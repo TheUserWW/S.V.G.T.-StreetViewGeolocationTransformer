@@ -181,10 +181,12 @@ class PipelineTests(unittest.TestCase):
             from dataclasses import asdict
             config_path = folder / "config.json"
             config_path.write_text(json.dumps(asdict(tiny_config())), encoding="utf-8")
-            train_manifest = folder / "osv_train.jsonl"
-            train_rows = [{"image": name + ".jpg", "osv5m_id": name, "source": "OpenStreetView-5M",
-                           "latitude": lat, "longitude": lon}
-                          for name, lat, lon in (("front", 34.0522, -118.2437), ("back", -33.8688, 151.2093))]
+            train_manifest = folder / "mapillary_train.jsonl"
+            train_rows = []
+            for index, (name, lat, lon) in enumerate((("front", 34.0522, -118.2437), ("back", -33.8688, 151.2093))):
+                Image.open(folder / (name + ".jpg")).save(folder / f"{index}.jpg")
+                train_rows.append({"image": f"{index}.jpg", "mapillary_id": str(index), "source": "Mapillary",
+                                   "latitude": lat, "longitude": lon})
             train_manifest.write_text("\n".join(json.dumps(row) for row in train_rows), encoding="utf-8")
             checkpoint = folder / "trained.pt"
             root = Path(__file__).resolve().parents[1]

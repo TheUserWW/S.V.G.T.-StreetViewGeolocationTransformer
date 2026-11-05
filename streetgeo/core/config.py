@@ -65,7 +65,7 @@ class TrainConfig:
     num_workers: int = 4
     device: str = "auto"
     seed: int = 1337
-    model_path: str = "checkpoints/streetgeo_400m_osv/best.pt"
+    model_path: str = "checkpoints/streetgeo_400m_mapillary/best.pt"
     save_every_steps: int = 500
     save_every_seconds: float = 300.0
     log_every_steps: int = 10

@@ -12,6 +12,8 @@
 6. 点击“关注区域 / 遮挡分析”，查看四个查询各自或平均的注意力热力图，调整叠加强度。在原图拖动框选，再点击“运行框选遮挡”，查看同一批原候选的概率变化和预测坐标变化；其他视角保留参与预测。可导出 PNG，也可取消分析。切换语言会同步更新已打开的解释窗口及统计文字，保留已有结果。
 7. 可勾选“仅官方街景覆盖国家／地区”，按内置名单离线限制预测坐标，选择会自动记住；取消勾选恢复全球预测。名单包含部分覆盖地区，不保证具体道路有街景，也不是实时、完整的 Google 覆盖数据。关注区域和遮挡分析使用同一范围。切换范围会清除旧结果，需要重新预测。
 
+拖动左侧栏与地图之间的分隔条可调整侧栏宽度，松开后自动保存；下次打开恢复。
+
 热力图反映上下文特征的聚合位置；每幅图独立归一化，不能直接当作预测原因。遮挡造成的坐标移动不是与真实位置的误差。图片与模型权重均不会被修改。
 
 **分发压缩包不包含模型权重；模型需要单独下载或传递。没有模型时也能正常打开客户端。**需要 Windows x64 与带 Tcl/Tk 的 64 位 Python 3.10–3.15；推荐 Python 3.12。推理使用 CPU，不需要 NVIDIA 显卡或训练数据。
@@ -28,13 +30,15 @@ Choose street-view images, see predicted locations on a map, and inspect attenti
 6. Select **Attention / occlusion** to view individual pooling-query heatmaps or their average and adjust the overlay. Drag a rectangle on the original, then select **Run occlusion** to compare the same original candidate cells and the predicted coordinates. Other views remain part of the prediction. Export a PNG or cancel analysis. Language switching also updates the open explanation window and comparison text without losing results.
 7. Enable **Google-covered countries/regions only** to restrict coordinates using the offline region allowlist. The preference is remembered; uncheck it for worldwide predictions. Partial-coverage regions are included. This is not a live or exhaustive Google coverage dataset and does not verify individual roads. Attention and occlusion use the same domain. Changing the domain clears previous results and requires a new prediction.
 
+Drag the divider between the sidebar and map to adjust the sidebar width. The width is saved when you release it and restored next time.
+
 Heatmaps show pooling of contextual features; each map is normalized separately and does not establish a prediction's cause. Location movement after occlusion is not error against ground truth. Images and model weights are never modified.
 
 **The distribution archive does not include model weights. Download or share the model separately. The client opens normally without a model.** Windows x64 and 64-bit Python 3.10–3.15 with Tcl/Tk are required; Python 3.12 is recommended. Inference runs on the CPU. No NVIDIA GPU or training data is needed.
 
 ## 分发与更新 / Distribution and updates
 
-Distribute the ZIP produced by `python -m streetgeo build-client --output clinet`. This build command creates the client and archive automatically. The archive contains application files and offline maps only; it excludes all model weights, `.runtime`, caches and personal preferences. Distribute model files separately. Existing local model files are preserved during rebuilds but are never added to the ZIP.
+Distribute the ZIP produced by `python -m streetgeo build-client` from the project root. This build command creates the client and archive automatically. The archive contains application files and offline maps only; it excludes all model weights, `.runtime`, caches and personal preferences. Distribute model files separately. Existing local model files are preserved during rebuilds but are never added to the ZIP.
 
 使用构建命令自动生成的压缩包分发客户端；模型文件请单独发送。接收者首次运行后自行选择模型，程序会在本机记住路径和语言。重新打包不会删除本地已有权重，压缩包不会包含它们。
 
