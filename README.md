@@ -4,6 +4,9 @@
 
 This repository provides the PyTorch model, Mapillary data tools, and command-line training and resume interfaces. Model weights and datasets are distributed separately from the source files.
 
+<img width="485" height="144" alt="0261031182559_5807_8" src="https://github.com/user-attachments/assets/2da703b4-7e67-4b90-984f-92cb9721ae33" />
+
+
 ## Model configurations
 
 | Configuration | Parameters | FP32 weights | Single-view CUDA batch |
